@@ -392,21 +392,39 @@ export default function FloorMapManager({ switches, onSwitchesChange, currentMap
   const [editingZone, setEditingZone]   = useState(null)
   const zoneDrawStart = useRef(null)
 
-  const wrapperRef  = useRef(null)
-  const contentRef  = useRef(null)
-  const rotateRef   = useRef(null)
-  const excelRef    = useRef(null)
+  const wrapperRef     = useRef(null)
+  const contentRef     = useRef(null)
+  const rotateRef      = useRef(null)
+  const excelRef       = useRef(null)
   const draggingPinRef = useRef(null)
+  // Ref keeps rotation current inside rAF callbacks without stale-closure issues
+  const rotationRef    = useRef(currentMap?.rotation ?? 0)
 
   // Sync rotation when map changes and schedule a fit once the new image is in the DOM
   useEffect(() => {
-    setRotation(currentMap?.rotation ?? 0)
+    const newRotation = currentMap?.rotation ?? 0
+    rotationRef.current = newRotation
+    setRotation(newRotation)
     setTransform({ x: 0, y: 0, scale: 1 })
     if (!currentMap?.id) return
-    // Two rAF passes: first lets React commit the new image, second lets the
-    // browser finish layout so offsetWidth/Height are correct.
-    const id = requestAnimationFrame(() => requestAnimationFrame(fitToPage))
-    return () => cancelAnimationFrame(id)
+    // Retry until both the wrapper and the image have non-zero dimensions.
+    // The wrapper may not have its flex height yet (first paint) and the image
+    // may still be loading — poll up to 30 frames before giving up.
+    let attempts = 0
+    let rafId
+    const tryFit = () => {
+      const wW = wrapperRef.current?.clientWidth
+      const wH = wrapperRef.current?.clientHeight
+      const cW = rotateRef.current?.offsetWidth
+      const cH = rotateRef.current?.offsetHeight
+      if (!wW || !wH || !cW || !cH) {
+        if (++attempts < 30) rafId = requestAnimationFrame(tryFit)
+        return
+      }
+      fitToPage()
+    }
+    rafId = requestAnimationFrame(tryFit)
+    return () => cancelAnimationFrame(rafId)
   }, [currentMap?.id])
 
   // Load zones and assignments when map changes
@@ -446,10 +464,15 @@ export default function FloorMapManager({ switches, onSwitchesChange, currentMap
     if (!wrapperRef.current || !rotateRef.current) return
     const wW = wrapperRef.current.clientWidth
     const wH = wrapperRef.current.clientHeight
-    const cW = rotateRef.current.offsetWidth
-    const cH = rotateRef.current.offsetHeight
+    const cW = rotateRef.current.offsetWidth   // DOM width  (pre-rotation)
+    const cH = rotateRef.current.offsetHeight  // DOM height (pre-rotation)
     if (!cW || !cH || !wW || !wH) return
-    const scale = Math.min(wW / cW, wH / cH)
+    // For 90°/270° the visual width and height are swapped vs the DOM dimensions,
+    // so we invert them when computing the scale — but keep the centering formula
+    // the same (it stays correct after the swap; verified geometrically).
+    const r = rotationRef.current
+    const isSwapped = r === 90 || r === 270
+    const scale = isSwapped ? Math.min(wW / cH, wH / cW) : Math.min(wW / cW, wH / cH)
     const x = (wW - cW * scale) / 2
     const y = (wH - cH * scale) / 2
     setTransform({ x, y, scale })
@@ -501,6 +524,7 @@ export default function FloorMapManager({ switches, onSwitchesChange, currentMap
   const handleRotate = async (dir) => {
     if (!currentMap) return
     const newRotation = ((rotation + (dir === 'cw' ? 90 : -90)) + 360) % 360
+    rotationRef.current = newRotation
     setRotation(newRotation)
     setTransform({ x: 0, y: 0, scale: 1 })
     try {
@@ -972,10 +996,10 @@ export default function FloorMapManager({ switches, onSwitchesChange, currentMap
           >
             {isPdfMap ? (
               <Document file={`/uploads/${currentMap.filename}`} loading="Loading PDF...">
-                <Page pageNumber={1} renderTextLayer={false} renderAnnotationLayer={false} onRenderSuccess={fitToPage} />
+                <Page pageNumber={1} renderTextLayer={false} renderAnnotationLayer={false} onRenderSuccess={() => requestAnimationFrame(fitToPage)} />
               </Document>
             ) : (
-              <img key={currentMap.id} src={`/uploads/${currentMap.filename}`} alt="Floor plan" onLoad={fitToPage} />
+              <img key={currentMap.id} src={`/uploads/${currentMap.filename}`} alt="Floor plan" onLoad={() => requestAnimationFrame(fitToPage)} />
             )}
 
             {/* Zone overlay — rendered above image, below seat pins */}
