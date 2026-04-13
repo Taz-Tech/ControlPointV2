@@ -1,0 +1,67 @@
+IMMYBOT DEVICE SYNC FIX
+=======================
+Date: 2026-04-03
+Files Modified: backend/routers/immybot.py, backend/routers/devices.py
+
+
+PROBLEM
+-------
+Devices that exist in ImmyBot were not appearing as "in_immybot: true" on the
+device search/lookup pages. For example, ACS-00028653285 was only showing data
+from Aurora (Cylance) even though the device is registered in ImmyBot.
+
+
+ROOT CAUSE
+----------
+There were two completely separate ImmyBot fetch implementations in the codebase:
+
+1. backend/routers/immybot.py  -- used by /api/immybot/computers and /api/immybot/stats
+2. backend/routers/devices.py  -- used by /api/devices/search, /api/devices/lookup,
+                                  and /api/devices/debug
+
+The fetch in devices.py was hardcoded with minimal params:
+    GET /api/v1/computers/paged?take=200&skip=0&includeOffline=true
+
+Any changes made to the params in immybot.py had no effect on the device search
+and lookup endpoints, because devices.py never called immybot.py's fetch function.
+The two implementations had drifted out of sync, causing some devices to be
+returned by one but not the other.
+
+
+CHANGES MADE
+------------
+1. backend/routers/immybot.py
+   - Switched the fetch endpoint from /api/v1/computers/paged (with take/skip
+     pagination) to /api/v1/computers/paged with the full set of required params:
+       sortDesc=true
+       onboardingOnly=false
+       staleOnly=false
+       devLabOnly=false
+       includeOffline=true
+       licensedOnly=false
+       deletedOnly=false
+   - Page size increased to 500 per request to reduce round trips.
+   - Timeout increased to 60s to accommodate larger payloads.
+
+2. backend/routers/devices.py
+   - Removed the duplicate inline ImmyBot fetch loop.
+   - _fetch_immybot_devices() now imports and calls _get_all_immybot_computers()
+     from immybot.py, ensuring both files always use the same request params.
+   - The /debug endpoint was updated the same way -- it now pulls the full device
+     list via the shared function rather than its own hardcoded request.
+   - Added _get_all_immybot_computers to the import from immybot.py.
+
+
+RESULT
+------
+- All ImmyBot device fetches now go through a single shared function in immybot.py.
+- Device search and lookup correctly show ImmyBot data for devices like ACS-00028653285.
+- Future param changes only need to be made in one place (immybot.py).
+
+
+NOTES
+-----
+- The _shape_immy() mapper in devices.py was not changed. It still reads fields
+  like computerName, isOnline, tenantName which are returned by the paged endpoint.
+- The /api/immybot/computers endpoint has its own _map_computer() mapper which
+  returns a slightly different shape (fewer fields) -- this is intentional.
