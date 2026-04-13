@@ -398,10 +398,15 @@ export default function FloorMapManager({ switches, onSwitchesChange, currentMap
   const excelRef    = useRef(null)
   const draggingPinRef = useRef(null)
 
-  // Sync rotation when map changes
+  // Sync rotation when map changes and schedule a fit once the new image is in the DOM
   useEffect(() => {
     setRotation(currentMap?.rotation ?? 0)
     setTransform({ x: 0, y: 0, scale: 1 })
+    if (!currentMap?.id) return
+    // Two rAF passes: first lets React commit the new image, second lets the
+    // browser finish layout so offsetWidth/Height are correct.
+    const id = requestAnimationFrame(() => requestAnimationFrame(fitToPage))
+    return () => cancelAnimationFrame(id)
   }, [currentMap?.id])
 
   // Load zones and assignments when map changes
@@ -970,7 +975,7 @@ export default function FloorMapManager({ switches, onSwitchesChange, currentMap
                 <Page pageNumber={1} renderTextLayer={false} renderAnnotationLayer={false} onRenderSuccess={fitToPage} />
               </Document>
             ) : (
-              <img src={`/uploads/${currentMap.filename}`} alt="Floor plan" onLoad={fitToPage} />
+              <img key={currentMap.id} src={`/uploads/${currentMap.filename}`} alt="Floor plan" onLoad={fitToPage} />
             )}
 
             {/* Zone overlay — rendered above image, below seat pins */}
