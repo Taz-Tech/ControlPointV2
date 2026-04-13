@@ -329,7 +329,7 @@ export default function App() {
         </aside>
 
         {/* ── Main ── */}
-        <div className="main-content">
+        <div className="main-content" style={active === 'locations' ? { overflow: 'hidden' } : {}}>
           <header className="main-header" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
             <h1>
               {active === 'settings'
@@ -339,17 +339,21 @@ export default function App() {
             <RCStatusSelector hasExtension={!!rcExtensionId} />
           </header>
 
-          <div className="page-body">
-            {active === 'dashboard'        && <Dashboard navigateTo={navigate} />}
-            {active === 'users'            && <UserLookup initialUser={navData} />}
-            {active === 'devices'          && <DeviceSearch />}
-            {active === 'conference_rooms' && <ConferenceRooms />}
-            {active === 'mailboxes'        && <SharedMailboxLookup />}
-            {active === 'locations'         && <Locations />}
-            {active === 'deployment'       && <DeploymentTools />}
-            {active === 'ringcentral'      && (isAdmin || rcPresenceAccess) && <RingCentral />}
-            {active === 'settings'         && <Settings />}
-          </div>
+          {/* Locations gets its own full-height layout — no page-body padding */}
+          {active === 'locations' && <Locations />}
+
+          {active !== 'locations' && (
+            <div className="page-body">
+              {active === 'dashboard'        && <Dashboard navigateTo={navigate} />}
+              {active === 'users'            && <UserLookup initialUser={navData} />}
+              {active === 'devices'          && <DeviceSearch />}
+              {active === 'conference_rooms' && <ConferenceRooms />}
+              {active === 'mailboxes'        && <SharedMailboxLookup />}
+              {active === 'deployment'       && <DeploymentTools />}
+              {active === 'ringcentral'      && (isAdmin || rcPresenceAccess) && <RingCentral />}
+              {active === 'settings'         && <Settings />}
+            </div>
+          )}
         </div>
 
         {showCredModal && (

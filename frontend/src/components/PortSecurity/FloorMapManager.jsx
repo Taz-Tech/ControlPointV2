@@ -147,7 +147,7 @@ function ZoneConfigForm({ onSave, onCancel, initial }) {
 }
 
 // ── Seat Assignment Card ──────────────────────────────────────────────────────
-function SeatAssignCard({ seat, assignment, color, onAssign, onUnassign }) {
+function SeatAssignCard({ seat, assignment, color, onAssign, onUnassign, readOnly }) {
   const [editing, setEditing] = useState(false)
   const [name, setName]       = useState('')
   const [email, setEmail]     = useState('')
@@ -177,7 +177,7 @@ function SeatAssignCard({ seat, assignment, color, onAssign, onUnassign }) {
         📍 {seat.seat_label}
         {seat.port && <span style={{ fontWeight: 400, color: 'var(--text-muted)', fontSize: '0.7rem', marginLeft: 4 }}>{seat.port}</span>}
       </div>
-      {editing ? (
+      {editing && !readOnly ? (
         <div>
           <input
             className="input"
@@ -210,16 +210,18 @@ function SeatAssignCard({ seat, assignment, color, onAssign, onUnassign }) {
           {assignment.user_email && assignment.user_display_name && (
             <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>{assignment.user_email}</div>
           )}
-          <div className="flex gap-1" style={{ marginTop: 5 }}>
-            <button className="btn btn-ghost" style={{ fontSize: '0.68rem', padding: '2px 7px' }} onClick={handleEdit}>
-              ✏️ Edit
-            </button>
-            <button className="btn btn-danger" style={{ fontSize: '0.68rem', padding: '2px 7px' }} onClick={onUnassign}>
-              Remove
-            </button>
-          </div>
+          {!readOnly && (
+            <div className="flex gap-1" style={{ marginTop: 5 }}>
+              <button className="btn btn-ghost" style={{ fontSize: '0.68rem', padding: '2px 7px' }} onClick={handleEdit}>
+                ✏️ Edit
+              </button>
+              <button className="btn btn-danger" style={{ fontSize: '0.68rem', padding: '2px 7px' }} onClick={onUnassign}>
+                Remove
+              </button>
+            </div>
+          )}
         </div>
-      ) : (
+      ) : !readOnly ? (
         <button
           className="btn btn-ghost"
           style={{ fontSize: '0.72rem', padding: '3px 8px', borderColor: `${color}60`, color: color }}
@@ -227,13 +229,15 @@ function SeatAssignCard({ seat, assignment, color, onAssign, onUnassign }) {
         >
           + Assign Employee
         </button>
+      ) : (
+        <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>Unassigned</span>
       )}
     </div>
   )
 }
 
 // ── Zone Detail Panel ─────────────────────────────────────────────────────────
-function ZoneDetailPanel({ zone, seats, assignments, onAssign, onUnassign, onEdit, onDelete, onClose }) {
+function ZoneDetailPanel({ zone, seats, assignments, onAssign, onUnassign, onEdit, onDelete, onClose, readOnly }) {
   const x1 = Math.min(zone.x1_pct, zone.x2_pct)
   const x2 = Math.max(zone.x1_pct, zone.x2_pct)
   const y1 = Math.min(zone.y1_pct, zone.y2_pct)
@@ -250,8 +254,8 @@ function ZoneDetailPanel({ zone, seats, assignments, onAssign, onUnassign, onEdi
         </div>
         <div className="flex gap-2" style={{ alignItems: 'center' }}>
           <span className="badge badge-gray">{assignedCount}/{zoneSeats.length} seats filled</span>
-          <button className="btn btn-ghost" style={{ fontSize: '0.75rem', padding: '3px 8px' }} onClick={onEdit}>✏️ Edit</button>
-          <button className="btn btn-danger" style={{ fontSize: '0.75rem', padding: '3px 8px' }} onClick={onDelete}>🗑️ Delete</button>
+          {!readOnly && <button className="btn btn-ghost" style={{ fontSize: '0.75rem', padding: '3px 8px' }} onClick={onEdit}>✏️ Edit</button>}
+          {!readOnly && <button className="btn btn-danger" style={{ fontSize: '0.75rem', padding: '3px 8px' }} onClick={onDelete}>🗑️ Delete</button>}
           <button className="btn btn-ghost" style={{ fontSize: '0.75rem', padding: '3px 8px' }} onClick={onClose}>✕</button>
         </div>
       </div>
@@ -797,12 +801,11 @@ export default function FloorMapManager({ switches, onSwitchesChange, currentMap
       setDraggingPin(null)
     } else if (!hasDraggedMap && e.type === 'pointerup') {
       if (e.target.closest('.seat-pin')) return
-      if (readOnly) return
-
       if (!rotateRef.current || !wrapperRef.current) return
+
       const { x_pct, y_pct } = screenToMap(e.clientX, e.clientY)
 
-      // Check if click lands inside any zone → select it instead of placing a pin
+      // Check if click lands inside any zone → select it (works in readOnly too)
       const clickedZone = zones.find(zone => {
         const zx1 = Math.min(zone.x1_pct, zone.x2_pct)
         const zx2 = Math.max(zone.x1_pct, zone.x2_pct)
@@ -819,8 +822,10 @@ export default function FloorMapManager({ switches, onSwitchesChange, currentMap
         return
       }
 
-      // Empty space click → deselect zone, place new pin
+      // Empty space click → deselect zone; read-only stops here (no pin placement)
       setSelectedZone(null)
+      if (readOnly) return
+
       setPendingPin({ x_pct, y_pct })
       setEditingSeat(null)
       onSeatSelect(null)
@@ -1018,6 +1023,7 @@ export default function FloorMapManager({ switches, onSwitchesChange, currentMap
           zone={selectedZone}
           seats={currentMap?.seats || []}
           assignments={assignments}
+          readOnly={readOnly}
           onAssign={handleAssign}
           onUnassign={handleUnassign}
           onEdit={() => { setEditingZone(selectedZone) }}
