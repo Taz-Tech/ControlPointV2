@@ -449,7 +449,7 @@ export default function FloorMapManager({ switches, onSwitchesChange, currentMap
     const cW = rotateRef.current.offsetWidth
     const cH = rotateRef.current.offsetHeight
     if (!cW || !cH || !wW || !wH) return
-    const scale = Math.min(wW / cW, wH / cH) * 0.95
+    const scale = Math.min(wW / cW, wH / cH)
     const x = (wW - cW * scale) / 2
     const y = (wH - cH * scale) / 2
     setTransform({ x, y, scale })
