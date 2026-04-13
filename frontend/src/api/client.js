@@ -131,6 +131,16 @@ export const addMapToSite         = (siteId, mapId)       => api.post(`/api/site
 export const removeMapFromSite    = (siteId, mapId)       => api.delete(`/api/sites/${siteId}/maps/${mapId}`)
 
 // ── Maps ──────────────────────────────────────────────────────────────────────
+// ── Zones ─────────────────────────────────────────────────────────────────────
+export const getZones           = (floorMapId)         => api.get('/api/zones/', { params: { floor_map_id: floorMapId } })
+export const createZone         = (body)               => api.post('/api/zones/', body)
+export const updateZone         = (id, body)           => api.put(`/api/zones/${id}`, body)
+export const deleteZone         = (id)                 => api.delete(`/api/zones/${id}`)
+export const getAssignments     = (floorMapId)         => api.get('/api/zones/assignments', { params: { floor_map_id: floorMapId } })
+export const upsertAssignment   = (seatId, body)       => api.put(`/api/zones/assignments/${seatId}`, body)
+export const deleteAssignment   = (seatId)             => api.delete(`/api/zones/assignments/${seatId}`)
+
+// ── Maps ──────────────────────────────────────────────────────────────────────
 export const getMaps       = ()        => api.get('/api/maps/')
 export const getMap        = (id)      => api.get(`/api/maps/${id}`)
 export const uploadMap     = (name, file) => {

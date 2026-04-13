@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { getMaps, getMap, deleteMap, getSwitches, addSeat, updateSeat, deleteSeat, updateMapRotation, importSeats } from '../../api/client.js'
+import { getMaps, getMap, deleteMap, getSwitches, addSeat, updateSeat, deleteSeat, updateMapRotation, importSeats, getZones, createZone, updateZone, deleteZone, getAssignments, upsertAssignment, deleteAssignment } from '../../api/client.js'
 import { Document, Page, pdfjs } from 'react-pdf'
 import * as xlsx from 'xlsx'
 import 'react-pdf/dist/Page/AnnotationLayer.css'
@@ -10,16 +10,27 @@ pdfjs.GlobalWorkerOptions.workerSrc = new URL(
   import.meta.url,
 ).toString()
 
+const ZONE_COLORS = [
+  '#3b82f6', // blue
+  '#22c55e', // green
+  '#f97316', // orange
+  '#a855f7', // purple
+  '#ef4444', // red
+  '#06b6d4', // cyan
+  '#eab308', // yellow
+  '#ec4899', // pink
+]
+
 // ── Seat Pin on Map ───────────────────────────────────────────────────────────
-function SeatPin({ seat, selected, onClick, onPointerDown }) {
-  const colors = { mapped: 'var(--cyan)', selected: 'var(--orange)' }
-  const color = selected ? colors.selected : colors.mapped
+function SeatPin({ seat, selected, onClick, onPointerDown, assigned }) {
+  const colors = { mapped: 'var(--cyan)', selected: 'var(--orange)', assigned: '#22c55e' }
+  const color = selected ? colors.selected : assigned ? colors.assigned : colors.mapped
   return (
     <div
       className={`seat-pin${selected ? ' selected' : ''}`}
-      style={{ left: `${seat.x_pct}%`, top: `${seat.y_pct}%`, color }}
+      style={{ left: `${seat.x_pct}%`, top: `${seat.y_pct}%`, color, zIndex: 10 }}
       onPointerDown={(e) => onPointerDown && onPointerDown(e, seat)}
-      title={`${seat.seat_label} → ${seat.switch_name || 'unassigned'} ${seat.port}`}
+      title={`${seat.seat_label} → ${seat.switch_name || 'unassigned'} ${seat.port}${assigned ? ` · ${assigned.user_display_name || assigned.user_email}` : ''}`}
     >
       {selected && <div className="pin-label">{seat.seat_label}</div>}
       <div className="pin-circle" style={{ background: color }}>{seat.seat_label.slice(0, 2)}</div>
@@ -68,6 +79,285 @@ function SeatForm({ switches, onSave, onCancel, initial }) {
   )
 }
 
+// ── Zone Config Form ──────────────────────────────────────────────────────────
+function ZoneConfigForm({ onSave, onCancel, initial }) {
+  const [name, setName]         = useState(initial?.name || '')
+  const [teamName, setTeamName] = useState(initial?.team_name || '')
+  const [color, setColor]       = useState(initial?.color || ZONE_COLORS[0])
+
+  return (
+    <div className="card" style={{ border: `1px solid ${color}`, boxShadow: `0 0 8px ${color}40` }}>
+      <div className="card-header">
+        <h4>{initial ? 'Edit Zone' : 'New Zone'}</h4>
+      </div>
+      <div className="card-body">
+        <div className="form-row">
+          <div className="form-group">
+            <label>Zone Name</label>
+            <input
+              className="input"
+              value={name}
+              onChange={e => setName(e.target.value)}
+              placeholder="Zone A, Engineering, Sales…"
+              autoFocus
+            />
+          </div>
+          <div className="form-group">
+            <label>Team</label>
+            <input
+              className="input"
+              value={teamName}
+              onChange={e => setTeamName(e.target.value)}
+              placeholder="Engineering, IT, HR…"
+            />
+          </div>
+        </div>
+        <div className="form-group">
+          <label>Color</label>
+          <div className="flex gap-2" style={{ flexWrap: 'wrap' }}>
+            {ZONE_COLORS.map(c => (
+              <button
+                key={c}
+                onClick={() => setColor(c)}
+                style={{
+                  width: 26, height: 26, borderRadius: '50%',
+                  background: c, border: 'none', cursor: 'pointer',
+                  outline: color === c ? `3px solid ${c}` : '2px solid transparent',
+                  outlineOffset: 2,
+                }}
+                title={c}
+              />
+            ))}
+          </div>
+        </div>
+        <div className="flex gap-3" style={{ justifyContent: 'flex-end' }}>
+          <button className="btn btn-ghost" onClick={onCancel}>Cancel</button>
+          <button
+            className="btn btn-primary"
+            style={{ background: color, borderColor: color }}
+            onClick={() => onSave({ name: name.trim(), team_name: teamName.trim(), color })}
+            disabled={!name.trim()}
+          >
+            {initial ? 'Update Zone' : 'Create Zone'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Seat Assignment Card ──────────────────────────────────────────────────────
+function SeatAssignCard({ seat, assignment, color, onAssign, onUnassign }) {
+  const [editing, setEditing] = useState(false)
+  const [name, setName]       = useState('')
+  const [email, setEmail]     = useState('')
+
+  const handleSave = () => {
+    if (!name.trim() && !email.trim()) return
+    onAssign({ user_display_name: name.trim() || null, user_email: email.trim() || null, user_id: null })
+    setEditing(false)
+    setName('')
+    setEmail('')
+  }
+
+  const handleEdit = () => {
+    setName(assignment?.user_display_name || '')
+    setEmail(assignment?.user_email || '')
+    setEditing(true)
+  }
+
+  return (
+    <div style={{
+      border: `1px solid ${color}30`,
+      borderRadius: 6,
+      padding: '8px 10px',
+      background: 'var(--bg-elevated)',
+    }}>
+      <div style={{ fontWeight: 600, fontSize: '0.8rem', marginBottom: 5, color: 'var(--text-primary)' }}>
+        📍 {seat.seat_label}
+        {seat.port && <span style={{ fontWeight: 400, color: 'var(--text-muted)', fontSize: '0.7rem', marginLeft: 4 }}>{seat.port}</span>}
+      </div>
+      {editing ? (
+        <div>
+          <input
+            className="input"
+            style={{ fontSize: '0.75rem', padding: '4px 6px', marginBottom: 4 }}
+            value={name}
+            onChange={e => setName(e.target.value)}
+            placeholder="Employee name"
+          />
+          <input
+            className="input"
+            style={{ fontSize: '0.75rem', padding: '4px 6px', marginBottom: 6 }}
+            value={email}
+            onChange={e => setEmail(e.target.value)}
+            placeholder="Email (optional)"
+          />
+          <div className="flex gap-1">
+            <button className="btn btn-primary" style={{ fontSize: '0.7rem', padding: '3px 10px' }} onClick={handleSave} disabled={!name.trim() && !email.trim()}>
+              Save
+            </button>
+            <button className="btn btn-ghost" style={{ fontSize: '0.7rem', padding: '3px 8px' }} onClick={() => setEditing(false)}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : assignment ? (
+        <div>
+          <div style={{ fontSize: '0.8rem', color: 'var(--text-primary)' }}>
+            {assignment.user_display_name || assignment.user_email || 'Assigned'}
+          </div>
+          {assignment.user_email && assignment.user_display_name && (
+            <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>{assignment.user_email}</div>
+          )}
+          <div className="flex gap-1" style={{ marginTop: 5 }}>
+            <button className="btn btn-ghost" style={{ fontSize: '0.68rem', padding: '2px 7px' }} onClick={handleEdit}>
+              ✏️ Edit
+            </button>
+            <button className="btn btn-danger" style={{ fontSize: '0.68rem', padding: '2px 7px' }} onClick={onUnassign}>
+              Remove
+            </button>
+          </div>
+        </div>
+      ) : (
+        <button
+          className="btn btn-ghost"
+          style={{ fontSize: '0.72rem', padding: '3px 8px', borderColor: `${color}60`, color: color }}
+          onClick={() => setEditing(true)}
+        >
+          + Assign Employee
+        </button>
+      )}
+    </div>
+  )
+}
+
+// ── Zone Detail Panel ─────────────────────────────────────────────────────────
+function ZoneDetailPanel({ zone, seats, assignments, onAssign, onUnassign, onEdit, onDelete, onClose }) {
+  const x1 = Math.min(zone.x1_pct, zone.x2_pct)
+  const x2 = Math.max(zone.x1_pct, zone.x2_pct)
+  const y1 = Math.min(zone.y1_pct, zone.y2_pct)
+  const y2 = Math.max(zone.y1_pct, zone.y2_pct)
+  const zoneSeats = seats.filter(s => s.x_pct >= x1 && s.x_pct <= x2 && s.y_pct >= y1 && s.y_pct <= y2)
+  const assignedCount = zoneSeats.filter(s => assignments[s.id]).length
+
+  return (
+    <div className="card" style={{ border: `1px solid ${zone.color}`, boxShadow: `0 0 10px ${zone.color}30` }}>
+      <div className="card-header" style={{ justifyContent: 'space-between' }}>
+        <div>
+          <h4 style={{ color: zone.color, marginBottom: 0 }}>{zone.name}</h4>
+          {zone.team_name && <span className="text-sm text-muted">{zone.team_name}</span>}
+        </div>
+        <div className="flex gap-2" style={{ alignItems: 'center' }}>
+          <span className="badge badge-gray">{assignedCount}/{zoneSeats.length} seats filled</span>
+          <button className="btn btn-ghost" style={{ fontSize: '0.75rem', padding: '3px 8px' }} onClick={onEdit}>✏️ Edit</button>
+          <button className="btn btn-danger" style={{ fontSize: '0.75rem', padding: '3px 8px' }} onClick={onDelete}>🗑️ Delete</button>
+          <button className="btn btn-ghost" style={{ fontSize: '0.75rem', padding: '3px 8px' }} onClick={onClose}>✕</button>
+        </div>
+      </div>
+      <div className="card-body">
+        {zoneSeats.length === 0 ? (
+          <p className="text-sm text-muted">No seat pins are inside this zone yet. Place pins on the map to assign employees.</p>
+        ) : (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 8 }}>
+            {zoneSeats.map(seat => (
+              <SeatAssignCard
+                key={seat.id}
+                seat={seat}
+                assignment={assignments[seat.id]}
+                color={zone.color}
+                onAssign={data => onAssign(seat.id, data)}
+                onUnassign={() => onUnassign(seat.id)}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ── Zone SVG Overlay ──────────────────────────────────────────────────────────
+function ZoneOverlay({ zones, selectedZoneId, drawingZone, zoneMode }) {
+  return (
+    <svg
+      style={{
+        position: 'absolute', top: 0, left: 0,
+        width: '100%', height: '100%',
+        overflow: 'visible', zIndex: 5,
+        pointerEvents: 'none',
+      }}
+    >
+      {zones.map(zone => {
+        const x = Math.min(zone.x1_pct, zone.x2_pct)
+        const y = Math.min(zone.y1_pct, zone.y2_pct)
+        const w = Math.abs(zone.x2_pct - zone.x1_pct)
+        const h = Math.abs(zone.y2_pct - zone.y1_pct)
+        const selected = zone.id === selectedZoneId
+        return (
+          <g key={zone.id}>
+            <rect
+              x={`${x}%`} y={`${y}%`}
+              width={`${w}%`} height={`${h}%`}
+              fill={zone.color}
+              fillOpacity={selected ? 0.28 : 0.12}
+              stroke={zone.color}
+              strokeWidth={selected ? 2.5 : 1.5}
+              strokeDasharray={selected ? undefined : '7,4'}
+              rx="4"
+            />
+            <text
+              x={`${x + w * 0.5}%`}
+              y={`${y + h * 0.5}%`}
+              textAnchor="middle"
+              dominantBaseline="central"
+              style={{ pointerEvents: 'none', userSelect: 'none' }}
+            >
+              <tspan
+                x={`${x + w * 0.5}%`}
+                dy={zone.team_name ? '-0.65em' : '0'}
+                fill={zone.color}
+                fontSize="13"
+                fontWeight="700"
+                style={{ filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.9))' }}
+              >
+                {zone.name}
+              </tspan>
+              {zone.team_name && (
+                <tspan
+                  x={`${x + w * 0.5}%`}
+                  dy="1.4em"
+                  fill={zone.color}
+                  fontSize="11"
+                  opacity="0.8"
+                  style={{ filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.9))' }}
+                >
+                  {zone.team_name}
+                </tspan>
+              )}
+            </text>
+          </g>
+        )
+      })}
+
+      {/* Live rectangle while drawing */}
+      {drawingZone && (
+        <rect
+          x={`${Math.min(drawingZone.x1_pct, drawingZone.x2_pct)}%`}
+          y={`${Math.min(drawingZone.y1_pct, drawingZone.y2_pct)}%`}
+          width={`${Math.abs(drawingZone.x2_pct - drawingZone.x1_pct)}%`}
+          height={`${Math.abs(drawingZone.y2_pct - drawingZone.y1_pct)}%`}
+          fill="rgba(59,130,246,0.12)"
+          stroke="#3b82f6"
+          strokeWidth="2"
+          strokeDasharray="8,4"
+          rx="4"
+        />
+      )}
+    </svg>
+  )
+}
+
 // ── Main FloorMapManager ──────────────────────────────────────────────────────
 export default function FloorMapManager({ switches, onSwitchesChange, currentMap, onMapChange, onSeatSelect, selectedSeat, siteMapIds, siteActive, readOnly = false, hideSelector = false, fullScreen = false }) {
   const [maps, setMaps]             = useState([])
@@ -86,11 +376,21 @@ export default function FloorMapManager({ switches, onSwitchesChange, currentMap
   // Excel Import State
   const [unplacedPins, setUnplacedPins] = useState([])
   const [draggedUnplacedPin, setDraggedUnplacedPin] = useState(null)
-  const [importResult, setImportResult] = useState(null)  // { updated, unmatched }
+  const [importResult, setImportResult] = useState(null)
 
-  const wrapperRef  = useRef(null)   // .map-canvas-wrapper
-  const contentRef  = useRef(null)   // pan/zoom div (.map-content)
-  const rotateRef   = useRef(null)   // inner rotation div (image + pins)
+  // Zone State
+  const [zones, setZones]               = useState([])
+  const [assignments, setAssignments]   = useState({})  // seat_id → assignment
+  const [zoneMode, setZoneMode]         = useState(false)
+  const [drawingZone, setDrawingZone]   = useState(null)
+  const [pendingZoneRect, setPendingZoneRect] = useState(null)  // rect coords waiting for ZoneConfigForm
+  const [selectedZone, setSelectedZone] = useState(null)
+  const [editingZone, setEditingZone]   = useState(null)
+  const zoneDrawStart = useRef(null)
+
+  const wrapperRef  = useRef(null)
+  const contentRef  = useRef(null)
+  const rotateRef   = useRef(null)
   const excelRef    = useRef(null)
   const draggingPinRef = useRef(null)
 
@@ -99,6 +399,39 @@ export default function FloorMapManager({ switches, onSwitchesChange, currentMap
     setRotation(currentMap?.rotation ?? 0)
     setTransform({ x: 0, y: 0, scale: 1 })
   }, [currentMap?.id])
+
+  // Load zones and assignments when map changes
+  useEffect(() => {
+    if (!currentMap?.id) { setZones([]); setAssignments({}); return }
+    getZones(currentMap.id)
+      .then(r => setZones(r.data))
+      .catch(() => {})
+    getAssignments(currentMap.id)
+      .then(r => {
+        const map = {}
+        r.data.forEach(a => { map[a.seat_id] = a })
+        setAssignments(map)
+      })
+      .catch(() => {})
+  }, [currentMap?.id])
+
+  const refreshZones = async () => {
+    if (!currentMap?.id) return
+    try {
+      const r = await getZones(currentMap.id)
+      setZones(r.data)
+    } catch(e) {}
+  }
+
+  const refreshAssignments = async () => {
+    if (!currentMap?.id) return
+    try {
+      const r = await getAssignments(currentMap.id)
+      const map = {}
+      r.data.forEach(a => { map[a.seat_id] = a })
+      setAssignments(map)
+    } catch(e) {}
+  }
 
   const fitToPage = () => {
     if (!wrapperRef.current || !rotateRef.current) return
@@ -130,12 +463,8 @@ export default function FloorMapManager({ switches, onSwitchesChange, currentMap
   }, [])
 
   // ── Coordinate conversion ──────────────────────────────────────────────────
-  // Convert screen (clientX, clientY) → layout percentages, accounting for
-  // pan, zoom, and rotation. Uses the wrapper rect (stable) + inverts the
-  // transform so coordinates never drift with zoom level.
   const screenToMap = (clientX, clientY) => {
     const wRect = wrapperRef.current.getBoundingClientRect()
-    // Undo pan + scale
     const lx = (clientX - wRect.left - transform.x) / transform.scale
     const ly = (clientY - wRect.top  - transform.y) / transform.scale
 
@@ -149,7 +478,6 @@ export default function FloorMapManager({ switches, onSwitchesChange, currentMap
       }
     }
 
-    // Undo rotation (CSS rotates around the element's center)
     const cx = w / 2, cy = h / 2
     const dx = lx - cx, dy = ly - cy
     const θ  = -rotation * Math.PI / 180
@@ -186,30 +514,20 @@ export default function FloorMapManager({ switches, onSwitchesChange, currentMap
     xlsx.writeFile(wb, 'seat-import-template.xlsx')
   }
 
-  // Separated out so reader.onload stays synchronous — an async onload handler
-  // causes Chrome to interpret the returned Promise as a message-channel response,
-  // which then throws "message channel closed" when the await resolves.
   const _processImportRows = async (rows) => {
     if (!rows.length) return
-
-    // If no map is loaded yet, just queue everything as unplaced pins
     if (!currentMap) {
       setUnplacedPins(prev => [...prev, ...rows])
       return
     }
-
     try {
       const payload = rows.map(({ seat_label, port, switch_name }) => ({ seat_label, port, switch_name }))
       const res = await importSeats(currentMap.id, payload)
       const { updated, unmatched } = res.data
-
-      // Refresh the map so updated seats reflect new port/switch immediately
       if (updated.length > 0) {
         const mapRes = await getMap(currentMap.id)
         onMapChange(mapRes.data)
       }
-
-      // Unmatched rows become unplaced pins to drag onto the map
       if (unmatched.length > 0) {
         const ts = Date.now()
         setUnplacedPins(prev => [
@@ -217,7 +535,6 @@ export default function FloorMapManager({ switches, onSwitchesChange, currentMap
           ...unmatched.map((r, i) => ({ ...r, id: `unplaced-${i}-${ts}` })),
         ])
       }
-
       setImportResult({ updated: updated.length, unmatched: unmatched.length })
     } catch (err) {
       setError(err.response?.data?.detail || 'Import failed')
@@ -233,8 +550,6 @@ export default function FloorMapManager({ switches, onSwitchesChange, currentMap
     const looksLikePort   = v => /^(gi|te|fa|eth|gigabit|tengig|fastethernet|tenGigabit)/i.test(v)
 
     const reader = new FileReader()
-    // Keep onload synchronous — an async handler makes Chrome think it's a
-    // message-channel responder and throws when awaits are still pending.
     reader.onload = (evt) => {
       const wb   = xlsx.read(evt.target.result, { type: 'binary' })
       const ws   = wb.Sheets[wb.SheetNames[0]]
@@ -242,20 +557,17 @@ export default function FloorMapManager({ switches, onSwitchesChange, currentMap
       const rows = data.map((row, i) => {
         const r = Object.fromEntries(Object.entries(row).map(([k, v]) => [k.toLowerCase().trim(), String(v ?? '').trim()]))
 
-        // Seat label — accept many common header names from real-world exports
         const seat_label =
           r['seat label'] || r['seat'] || r['label'] || r['name'] ||
           r['location']   || r['desk'] || r['workstation'] || r['station'] ||
           r['room']       || r['endpoint'] || r['node'] || r['asset'] ||
           r['pc name']    || r['computer'] || r['device name'] || ''
 
-        // Port column — accept common network-port header names
         const colA =
           r['port']       || r['interface']       || r['port number']   ||
           r['jack']       || r['interface name']  || r['network port']  ||
           r['connection'] || r['port id']         || ''
 
-        // Switch column — accept IP addresses, hostnames, and description fields
         const colB =
           r['switch']         || r['switch name']   || r['switch ip']    ||
           r['device']         || r['network device']|| r['hostname']     ||
@@ -283,7 +595,6 @@ export default function FloorMapManager({ switches, onSwitchesChange, currentMap
         return
       }
 
-      // Defer async work so the event handler itself returns synchronously
       _processImportRows(rows).catch(err => setError(err.message || 'Import failed'))
     }
     reader.readAsBinaryString(file)
@@ -304,6 +615,62 @@ export default function FloorMapManager({ switches, onSwitchesChange, currentMap
     await deleteMap(currentMap.id)
     onMapChange(null)
     await refreshMaps()
+  }
+
+  // ── Zone Handlers ──────────────────────────────────────────────────────────
+  const toggleZoneMode = () => {
+    setZoneMode(z => !z)
+    setDrawingZone(null)
+    zoneDrawStart.current = null
+    setPendingZoneRect(null)
+    setSelectedZone(null)
+    setEditingZone(null)
+  }
+
+  const handleSaveZone = async (form) => {
+    try {
+      if (editingZone) {
+        await updateZone(editingZone.id, form)
+        setEditingZone(null)
+        setSelectedZone(null)
+      } else if (pendingZoneRect) {
+        await createZone({ ...form, floor_map_id: currentMap.id, ...pendingZoneRect })
+        setPendingZoneRect(null)
+        setZoneMode(false)
+      }
+      await refreshZones()
+    } catch(e) {
+      setError(e.response?.data?.detail || 'Failed to save zone')
+    }
+  }
+
+  const handleDeleteZone = async (zone) => {
+    if (!window.confirm(`Delete zone "${zone.name}"? Employee assignments will also be removed.`)) return
+    try {
+      await deleteZone(zone.id)
+      setSelectedZone(null)
+      await refreshZones()
+    } catch(e) {
+      setError('Failed to delete zone')
+    }
+  }
+
+  const handleAssign = async (seatId, data) => {
+    try {
+      await upsertAssignment(seatId, data)
+      await refreshAssignments()
+    } catch(e) {
+      setError('Failed to save assignment')
+    }
+  }
+
+  const handleUnassign = async (seatId) => {
+    try {
+      await deleteAssignment(seatId)
+      await refreshAssignments()
+    } catch(e) {
+      setError('Failed to remove assignment')
+    }
   }
 
   // ── Transform & Pan ────────────────────────────────────────────────────────
@@ -340,6 +707,16 @@ export default function FloorMapManager({ switches, onSwitchesChange, currentMap
     e.currentTarget.setPointerCapture(e.pointerId)
     setHasDraggedMap(false)
     setPanStart({ x: e.clientX, y: e.clientY })
+
+    // Zone draw mode: start rectangle
+    if (zoneMode) {
+      if (!rotateRef.current || !wrapperRef.current) return
+      const { x_pct, y_pct } = screenToMap(e.clientX, e.clientY)
+      zoneDrawStart.current = { x_pct, y_pct }
+      setDrawingZone({ x1_pct: x_pct, y1_pct: y_pct, x2_pct: x_pct, y2_pct: y_pct })
+      return
+    }
+
     if (e.target.closest('.seat-pin')) return
     setIsPanning(true)
   }
@@ -349,6 +726,19 @@ export default function FloorMapManager({ switches, onSwitchesChange, currentMap
 
     const dx = e.clientX - panStart.x
     const dy = e.clientY - panStart.y
+
+    // Zone draw mode: update live rectangle
+    if (zoneMode && zoneDrawStart.current) {
+      if (!rotateRef.current || !wrapperRef.current) return
+      const { x_pct, y_pct } = screenToMap(e.clientX, e.clientY)
+      setDrawingZone({
+        x1_pct: zoneDrawStart.current.x_pct,
+        y1_pct: zoneDrawStart.current.y_pct,
+        x2_pct: x_pct,
+        y2_pct: y_pct,
+      })
+      return
+    }
 
     if (isPanning) {
       if (!hasDraggedMap && Math.abs(dx) < 3 && Math.abs(dy) < 3) return
@@ -372,6 +762,18 @@ export default function FloorMapManager({ switches, onSwitchesChange, currentMap
   const handlePointerUp = async (e) => {
     if (!currentMap) return
     try { e.currentTarget.releasePointerCapture(e.pointerId) } catch(err) {}
+
+    // Zone draw mode: finalize rectangle
+    if (zoneMode && zoneDrawStart.current) {
+      const rect = drawingZone
+      zoneDrawStart.current = null
+      setDrawingZone(null)
+      // Only show the form if the drawn area is meaningful (> 2% in both directions)
+      if (rect && Math.abs(rect.x2_pct - rect.x1_pct) > 2 && Math.abs(rect.y2_pct - rect.y1_pct) > 2) {
+        setPendingZoneRect(rect)
+      }
+      return
+    }
 
     if (isPanning) {
       setIsPanning(false)
@@ -399,6 +801,26 @@ export default function FloorMapManager({ switches, onSwitchesChange, currentMap
 
       if (!rotateRef.current || !wrapperRef.current) return
       const { x_pct, y_pct } = screenToMap(e.clientX, e.clientY)
+
+      // Check if click lands inside any zone → select it instead of placing a pin
+      const clickedZone = zones.find(zone => {
+        const zx1 = Math.min(zone.x1_pct, zone.x2_pct)
+        const zx2 = Math.max(zone.x1_pct, zone.x2_pct)
+        const zy1 = Math.min(zone.y1_pct, zone.y2_pct)
+        const zy2 = Math.max(zone.y1_pct, zone.y2_pct)
+        return x_pct >= zx1 && x_pct <= zx2 && y_pct >= zy1 && y_pct <= zy2
+      })
+
+      if (clickedZone) {
+        setSelectedZone(z => z?.id === clickedZone.id ? null : clickedZone)
+        setPendingPin(null)
+        setEditingSeat(null)
+        onSeatSelect(null)
+        return
+      }
+
+      // Empty space click → deselect zone, place new pin
+      setSelectedZone(null)
       setPendingPin({ x_pct, y_pct })
       setEditingSeat(null)
       onSeatSelect(null)
@@ -484,18 +906,31 @@ export default function FloorMapManager({ switches, onSwitchesChange, currentMap
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: fullScreen ? '8px 16px' : '0 0 8px', flexShrink: 0 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <span className="badge badge-gray">{currentMap.seats?.length || 0} pins</span>
+          {zones.length > 0 && !zoneMode && (
+            <span className="badge badge-purple">{zones.length} zone{zones.length !== 1 ? 's' : ''}</span>
+          )}
           {!readOnly && (
             <>
               <button className="btn btn-ghost" style={{ fontSize: '0.75rem', padding: '3px 10px' }} onClick={() => handleRotate('ccw')} title="Rotate 90° counter-clockwise">↺ CCW</button>
               <button className="btn btn-ghost" style={{ fontSize: '0.75rem', padding: '3px 10px' }} onClick={() => handleRotate('cw')}  title="Rotate 90° clockwise">↻ CW</button>
               {rotation !== 0 && <span style={{ fontSize: '0.7rem', color: 'var(--cyan)' }}>{rotation}°</span>}
+              <button
+                className={`btn ${zoneMode ? 'btn-primary' : 'btn-ghost'}`}
+                style={{ fontSize: '0.75rem', padding: '3px 10px', ...(zoneMode ? {} : { borderColor: '#a855f7', color: '#a855f7' }) }}
+                onClick={toggleZoneMode}
+                title={zoneMode ? 'Cancel zone drawing' : 'Draw a zone overlay'}
+              >
+                {zoneMode ? '✕ Cancel' : '▭ Draw Zone'}
+              </button>
             </>
           )}
         </div>
         <span className="text-xs text-muted" style={{ textAlign: 'right' }}>
-          {readOnly
-            ? 'Scroll to zoom · Drag to pan · Click pin to select'
-            : 'Scroll to zoom · Drag map to pan · Drag pins to move · Click to add pin'}
+          {zoneMode
+            ? 'Click and drag to draw a zone'
+            : readOnly
+              ? 'Scroll to zoom · Drag to pan · Click pin to select'
+              : 'Scroll to zoom · Drag map to pan · Drag pins to move · Click to add pin'}
         </span>
       </div>
 
@@ -503,7 +938,10 @@ export default function FloorMapManager({ switches, onSwitchesChange, currentMap
       <div
         ref={wrapperRef}
         className="map-canvas-wrapper"
-        style={fullScreen ? { flex: 1, height: 'auto' } : {}}
+        style={{
+          ...(fullScreen ? { flex: 1, height: 'auto' } : {}),
+          cursor: zoneMode ? 'crosshair' : undefined,
+        }}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
@@ -517,7 +955,7 @@ export default function FloorMapManager({ switches, onSwitchesChange, currentMap
           className="map-content"
           style={{ transform: `translate(${transform.x}px, ${transform.y}px) scale(${transform.scale})` }}
         >
-          {/* Rotation layer — image + pins rotate together */}
+          {/* Rotation layer — image + overlays + pins rotate together */}
           <div
             ref={rotateRef}
             style={{ transform: `rotate(${rotation}deg)`, transformOrigin: '50% 50%', position: 'relative' }}
@@ -530,6 +968,14 @@ export default function FloorMapManager({ switches, onSwitchesChange, currentMap
               <img src={`/uploads/${currentMap.filename}`} alt="Floor plan" onLoad={fitToPage} />
             )}
 
+            {/* Zone overlay — rendered above image, below seat pins */}
+            <ZoneOverlay
+              zones={zones}
+              selectedZoneId={selectedZone?.id}
+              drawingZone={drawingZone}
+              zoneMode={zoneMode}
+            />
+
             {pendingPin && (
               <div className="seat-pin" style={{ left: `${pendingPin.x_pct}%`, top: `${pendingPin.y_pct}%`, color: 'var(--yellow)', zIndex: 20 }}>
                 <div className="pin-circle" style={{ background: 'var(--yellow)' }}>+</div>
@@ -541,6 +987,7 @@ export default function FloorMapManager({ switches, onSwitchesChange, currentMap
                 key={seat.id}
                 seat={seat}
                 selected={selectedSeat?.id === seat.id}
+                assigned={assignments[seat.id]}
                 onPointerDown={readOnly ? undefined : (e, s) => { draggingPinRef.current = s; setDraggingPin(s) }}
               />
             ))}
@@ -553,7 +1000,32 @@ export default function FloorMapManager({ switches, onSwitchesChange, currentMap
   // ── Shared bottom forms ────────────────────────────────────────────────────
   const bottomForms = (
     <>
-      {(pendingPin || editingSeat) && (
+      {pendingZoneRect && (
+        <ZoneConfigForm
+          onSave={handleSaveZone}
+          onCancel={() => { setPendingZoneRect(null); setZoneMode(false) }}
+        />
+      )}
+      {editingZone && (
+        <ZoneConfigForm
+          initial={editingZone}
+          onSave={handleSaveZone}
+          onCancel={() => setEditingZone(null)}
+        />
+      )}
+      {selectedZone && !editingZone && !pendingZoneRect && (
+        <ZoneDetailPanel
+          zone={selectedZone}
+          seats={currentMap?.seats || []}
+          assignments={assignments}
+          onAssign={handleAssign}
+          onUnassign={handleUnassign}
+          onEdit={() => { setEditingZone(selectedZone) }}
+          onDelete={() => handleDeleteZone(selectedZone)}
+          onClose={() => setSelectedZone(null)}
+        />
+      )}
+      {(pendingPin || editingSeat) && !pendingZoneRect && !editingZone && (
         <SeatForm
           switches={switches}
           onSave={handleSaveSeat}
@@ -561,9 +1033,15 @@ export default function FloorMapManager({ switches, onSwitchesChange, currentMap
           initial={editingSeat ? { seat_label: editingSeat.seat_label, port: editingSeat.port, switch_id: editingSeat.switch_id || '' } : null}
         />
       )}
-      {selectedSeat && !editingSeat && !pendingPin && (
+      {selectedSeat && !editingSeat && !pendingPin && !selectedZone && !pendingZoneRect && !editingZone && (
         <div className="alert alert-info" style={{ justifyContent: 'space-between' }}>
-          <span>📍 Selected: <strong>{selectedSeat.seat_label}</strong> → {selectedSeat.switch_name || '?'} : <span className="font-mono">{selectedSeat.port}</span></span>
+          <span>📍 Selected: <strong>{selectedSeat.seat_label}</strong> → {selectedSeat.switch_name || '?'} : <span className="font-mono">{selectedSeat.port}</span>
+            {assignments[selectedSeat.id] && (
+              <span style={{ marginLeft: 10, color: '#22c55e' }}>
+                · {assignments[selectedSeat.id].user_display_name || assignments[selectedSeat.id].user_email}
+              </span>
+            )}
+          </span>
           {!readOnly && (
             <div className="flex gap-2">
               <button className="btn btn-ghost" style={{ fontSize: '0.75rem', padding: '4px 10px' }} onClick={() => handleStartEditSeat(selectedSeat)}>✏️ Edit</button>
@@ -629,7 +1107,7 @@ export default function FloorMapManager({ switches, onSwitchesChange, currentMap
         </div>
 
         {/* Forms pinned at bottom */}
-        {(pendingPin || editingSeat || (selectedSeat && !editingSeat && !pendingPin)) && (
+        {(pendingPin || editingSeat || pendingZoneRect || editingZone || selectedZone || (selectedSeat && !editingSeat && !pendingPin && !selectedZone)) && (
           <div style={{ flexShrink: 0, padding: '8px 16px' }}>
             {bottomForms}
           </div>

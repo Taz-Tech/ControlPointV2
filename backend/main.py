@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 load_dotenv(dotenv_path=Path(__file__).parent / ".env", override=True)
 
 from .database import create_all
-from .routers import users, switches, maps, freshservice, mailboxes, settings, immybot, shortcuts, bookmarks, sites, integrations, devices, logitech_sync, intune, conference_rooms, room_configs, ringcentral
+from .routers import users, switches, maps, freshservice, mailboxes, settings, immybot, shortcuts, bookmarks, sites, integrations, devices, logitech_sync, intune, conference_rooms, room_configs, ringcentral, zones
 from .jwt_middleware import AzureJWTMiddleware
 
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
@@ -70,6 +70,7 @@ app.include_router(intune.router)
 app.include_router(conference_rooms.router)
 app.include_router(room_configs.router)
 app.include_router(ringcentral.router)
+app.include_router(zones.router)
 
 
 @app.get("/api/health")

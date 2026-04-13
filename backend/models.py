@@ -77,6 +77,7 @@ class FloorMap(Base):
     rotation = Column(Integer, nullable=False, default=0)  # 0 | 90 | 180 | 270
 
     seats = relationship("SeatMapping", back_populates="floor_map", cascade="all, delete-orphan")
+    zones = relationship("Zone", back_populates="floor_map", cascade="all, delete-orphan")
 
 
 class UserRecord(Base):
@@ -147,3 +148,35 @@ class SeatMapping(Base):
 
     switch = relationship("Switch", back_populates="seat_mappings")
     floor_map = relationship("FloorMap", back_populates="seats")
+    assignment = relationship("SeatAssignment", back_populates="seat", uselist=False, cascade="all, delete-orphan")
+
+
+class Zone(Base):
+    """A named, colored bounding-box overlay on a floor map for team/area management."""
+    __tablename__ = "zones"
+
+    id           = Column(Integer, primary_key=True, index=True)
+    name         = Column(String, nullable=False)
+    team_name    = Column(String, nullable=False, default="")
+    color        = Column(String, nullable=False, default="#3b82f6")   # hex color
+    floor_map_id = Column(Integer, ForeignKey("floor_maps.id", ondelete="CASCADE"), nullable=False)
+    x1_pct       = Column(Float, nullable=False)   # top-left corner, 0-100 % of image
+    y1_pct       = Column(Float, nullable=False)
+    x2_pct       = Column(Float, nullable=False)   # bottom-right corner
+    y2_pct       = Column(Float, nullable=False)
+
+    floor_map = relationship("FloorMap", back_populates="zones")
+
+
+class SeatAssignment(Base):
+    """Assigns an employee to a specific seat on a floor map."""
+    __tablename__ = "seat_assignments"
+
+    id                 = Column(Integer, primary_key=True, index=True)
+    seat_id            = Column(Integer, ForeignKey("seat_mappings.id", ondelete="CASCADE"), nullable=False, unique=True)
+    user_id            = Column(String, nullable=True)   # Azure AD OID (optional)
+    user_display_name  = Column(String, nullable=True)
+    user_email         = Column(String, nullable=True)
+    assigned_at        = Column(String, nullable=False)  # ISO datetime string
+
+    seat = relationship("SeatMapping", back_populates="assignment")
