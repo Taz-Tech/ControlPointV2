@@ -11,14 +11,17 @@ import ConferenceRooms from './components/ConferenceRooms.jsx'
 import SharedMailboxLookup from './components/SharedMailboxLookup.jsx'
 import RingCentral from './components/RingCentral.jsx'
 import Locations from './components/Locations.jsx'
+import Network from './components/Network.jsx'
+import RCEmbeddable from './components/RCEmbeddable.jsx'
 
 export const CredentialsContext = createContext(null)
-export const UserContext = createContext({ role: 'user', isAdmin: false, rcPresenceAccess: false })
+export const UserContext = createContext({ role: 'user', isAdmin: false, rcPresenceAccess: false, permissions: [], hasPermission: () => false })
 
 const NAV_ITEMS = [
   { id: 'dashboard',        icon: '📊', label: 'Dashboard',         group: 'Overview' },
   { id: 'users',            icon: '👤', label: 'User Lookup',       group: 'Tools' },
   { id: 'devices',          icon: '💻', label: 'Device Search',     group: 'Tools' },
+  { id: 'network',          icon: '📡', label: 'Network',           group: 'Tools' },
   { id: 'conference_rooms', icon: '🏢', label: 'Conference Rooms',  group: 'Tools' },
   { id: 'locations',        icon: '📍', label: 'Locations',         group: 'Tools' },
   { id: 'mailboxes',        icon: '📬', label: 'Shared Mailboxes',  group: 'Tools' },
@@ -29,9 +32,11 @@ const NAV_ITEMS = [
 // ── RC presence status selector ───────────────────────────────────────────────
 
 const RC_STATUS_OPTIONS = [
-  { value: 'Available', label: 'Available',      dot: '#22c55e', body: { dnd_status: 'TakeAllCalls',          user_status: 'Available' } },
-  { value: 'Busy',      label: 'Busy',           dot: '#f59e0b', body: { dnd_status: 'TakeAllCalls',          user_status: 'Busy'      } },
-  { value: 'DND',       label: 'Do Not Disturb', dot: '#ef4444', body: { dnd_status: 'DoNotAcceptAnyCalls'                             } },
+  { value: 'Available', label: 'Available',      dot: '#22c55e', body: { dnd_status: 'TakeAllCalls',       user_status: 'Available', label: 'Available' } },
+  { value: 'Busy',      label: 'Busy',           dot: '#f59e0b', body: { dnd_status: 'TakeAllCalls',       user_status: 'Busy',      label: 'Busy'      } },
+  { value: 'DND',       label: 'Do Not Disturb', dot: '#ef4444', body: { dnd_status: 'DoNotAcceptAnyCalls',                          label: 'DND'       } },
+  { value: 'Lunch',     label: 'Lunch',          dot: '#ef4444', body: { dnd_status: 'DoNotAcceptAnyCalls',                          label: 'Lunch'     } },
+  { value: 'Break',     label: 'Break',          dot: '#ef4444', body: { dnd_status: 'DoNotAcceptAnyCalls',                          label: 'Break'     } },
 ]
 
 function RCStatusSelector({ hasExtension }) {
@@ -169,6 +174,7 @@ export default function App() {
   })
   const [navData, setNavData]             = useState(null)
   const [userRole, setUserRole]               = useState('user')
+  const [permissions, setPermissions]         = useState([])
   const [rcExtensionId, setRcExtensionId]     = useState('')
   const [rcPresenceAccess, setRcPresenceAccess] = useState(false)
   const [credentials, setCredentials]     = useState(null)
@@ -181,13 +187,13 @@ export default function App() {
     localStorage.setItem('theme', theme)
   }, [theme])
 
-  const toggleTheme = useCallback(() => setTheme(t => t === 'dark' ? 'light' : 'dark'), [])
 
   useEffect(() => {
     api.get('/api/settings/me').then(r => {
       setUserRole(r.data.role || 'user')
       setRcExtensionId(r.data.rc_extension_id || '')
       setRcPresenceAccess(!!r.data.rc_presence_access)
+      setPermissions(r.data.permissions || [])
     }).catch(() => {})
   }, [])
 
@@ -202,15 +208,21 @@ export default function App() {
   }
 
   const isAdmin = userRole === 'admin'
+  const hasPermission = (perm) => isAdmin || permissions.includes(perm)
 
   return (
-    <UserContext.Provider value={{ role: userRole, isAdmin, rcPresenceAccess }}>
+    <UserContext.Provider value={{ role: userRole, isAdmin, rcPresenceAccess, permissions, hasPermission }}>
     <CredentialsContext.Provider value={{ credentials, setCredentials, showCredModal, setShowCredModal }}>
       <div className="app-shell">
         {/* ── Sidebar ── */}
         <aside className={`sidebar${sidebarCollapsed ? ' collapsed' : ''}`}>
           <div className="sidebar-logo">
-            <div className="logo-badge">
+            <div
+              className="logo-badge"
+              onClick={() => setSidebarCollapsed(c => !c)}
+              title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+              style={{ cursor: 'pointer' }}
+            >
               {(branding.iconUrl || branding.logoUrl)
                 ? <img src={branding.iconUrl || branding.logoUrl} alt="Logo" style={{ width: 32, height: 32, objectFit: 'contain', borderRadius: 4, flexShrink: 0 }} />
                 : <div className="logo-icon">⚡</div>}
@@ -218,20 +230,13 @@ export default function App() {
                 <div className="logo-text">Control<br/>Point</div>
               </div>
             </div>
-            <button
-              className="sidebar-collapse-btn"
-              onClick={() => setSidebarCollapsed(c => !c)}
-              title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-            >
-              {sidebarCollapsed ? '›' : '‹'}
-            </button>
           </div>
 
           <nav className="sidebar-nav">
             {['Overview', 'Tools', 'Comms'].map(group => {
               const canSee = (item) => {
-                if (item.id === 'ringcentral') return isAdmin || rcPresenceAccess
-                return true
+                if (item.id === 'ringcentral') return isAdmin || rcPresenceAccess || permissions.includes('nav.ringcentral')
+                return hasPermission(`nav.${item.id}`)
               }
               const items = NAV_ITEMS.filter(n => n.group === group && canSee(n))
               if (items.length === 0) return null
@@ -256,29 +261,17 @@ export default function App() {
 
           {/* ── Settings + User footer ── */}
           <div style={{ marginTop: 'auto' }}>
-            {/* Theme toggle + Settings */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, margin: '0 8px 4px' }}>
+            {/* Settings */}
+            <div style={{ margin: '0 8px 4px' }}>
               <div
                 className={`nav-item${active === 'settings' ? ' active' : ''}`}
-                style={{ flex: 1, margin: 0 }}
+                style={{ margin: 0 }}
                 onClick={() => navigate('settings')}
               >
                 <span className="nav-icon">⚙️</span>
                 <span className="nav-item-label">Settings</span>
               </div>
-              {!sidebarCollapsed && (
-                <button className="theme-toggle" onClick={toggleTheme} title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}>
-                  {theme === 'dark' ? '☀️' : '🌙'}
-                </button>
-              )}
             </div>
-            {sidebarCollapsed && (
-              <div style={{ display: 'flex', justifyContent: 'center', margin: '0 0 4px' }}>
-                <button className="theme-toggle" onClick={toggleTheme} title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}>
-                  {theme === 'dark' ? '☀️' : '🌙'}
-                </button>
-              </div>
-            )}
 
             {/* Signed-in user */}
             {account && (
@@ -347,11 +340,12 @@ export default function App() {
               {active === 'dashboard'        && <Dashboard navigateTo={navigate} />}
               {active === 'users'            && <UserLookup initialUser={navData} />}
               {active === 'devices'          && <DeviceSearch />}
+              {active === 'network'          && <Network />}
               {active === 'conference_rooms' && <ConferenceRooms />}
               {active === 'mailboxes'        && <SharedMailboxLookup />}
               {active === 'deployment'       && <DeploymentTools />}
               {active === 'ringcentral'      && (isAdmin || rcPresenceAccess) && <RingCentral />}
-              {active === 'settings'         && <Settings />}
+              {active === 'settings'         && <Settings theme={theme} setTheme={setTheme} />}
             </div>
           )}
         </div>
@@ -362,6 +356,8 @@ export default function App() {
             onSave={(creds) => { setCredentials(creds); setShowCredModal(false) }}
           />
         )}
+
+        <RCEmbeddable />
 
       </div>
     </CredentialsContext.Provider>

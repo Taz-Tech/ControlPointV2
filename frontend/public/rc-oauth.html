@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html>
+<head><title>RingCentral Auth</title></head>
+<body style="font-family:sans-serif;padding:24px;max-width:480px">
+<h3 id="title" style="margin:0 0 12px">Completing sign-in…</h3>
+<p id="status" style="color:#555"></p>
+<script>
+  var href   = window.location.href;
+  var params = new URLSearchParams(window.location.search);
+
+  if (params.has('error')) {
+    document.getElementById('title').textContent = 'RC OAuth Error';
+    document.getElementById('status').textContent =
+      params.get('error') + ': ' + (params.get('error_description') || '');
+  } else if (params.has('code')) {
+    document.getElementById('title').textContent = 'Auth code received ✓';
+    document.getElementById('status').textContent = 'Passing to widget… closes in 3s';
+
+    // Post to the iframe that opened this popup
+    if (window.opener) {
+      window.opener.postMessage(href, '*');
+    }
+
+    // Also post to the top-level window so the relay listener in the parent
+    // app can forward it into the iframe (handles the case where the iframe's
+    // own message handler doesn't fire)
+    try {
+      if (window.opener && window.opener.top) {
+        window.opener.top.postMessage(href, '*');
+      }
+    } catch (e) {}
+
+    setTimeout(function () { window.close(); }, 3000);
+  } else {
+    document.getElementById('title').textContent = 'No auth code';
+    document.getElementById('status').textContent = 'This page is only used by the RC widget OAuth flow.';
+  }
+</script>
+</body>
+</html>

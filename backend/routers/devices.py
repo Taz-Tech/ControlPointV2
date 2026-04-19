@@ -12,7 +12,7 @@ from sqlalchemy import select, delete
 from .immybot import _get_immybot_token, _cfg as _immy_cfg, is_immybot_configured, _get_all_immybot_computers, _shape_computer, _collect_macs
 from .intune import _get_intune_token, is_intune_configured, _shape_device as _shape_intune
 from ..database import AsyncSessionLocal
-from ..models import ImmybotDeviceCache
+from ..models import ImmybotDeviceCache, DeviceRecord
 
 router = APIRouter(prefix="/api/devices", tags=["devices"])
 
@@ -711,3 +711,239 @@ async def get_device_exploits(name: str = Query(..., min_length=1)):
 
     results.sort(key=lambda x: x.get("dateFound") or "", reverse=True)
     return {"device": name, "device_id": device_id, "exploits": results, "total": len(results)}
+
+
+# ── Unified device inventory ───────────────────────────────────────────────────
+
+def _record_to_dict(r: DeviceRecord) -> dict:
+    return {
+        "id":               r.id,
+        "normalized_name":  r.normalized_name,
+        "name":             r.name,
+        "serial_number":    r.serial_number,
+        "manufacturer":     r.manufacturer,
+        "model":            r.model,
+        "operating_system": r.operating_system,
+        "primary_user_email": r.primary_user_email,
+        "primary_user_name":  r.primary_user_name,
+        "last_updated":     r.last_updated,
+        "immy": {
+            "id":        r.immy_id,
+            "is_online": r.immy_is_online,
+            "last_seen": r.immy_last_seen,
+            "last_boot": r.immy_last_boot,
+            "tenant":    r.immy_tenant,
+            "url":       r.immy_url,
+            "ip":        r.immy_ip,
+            "mac":       r.immy_mac,
+            "synced_at": r.immy_synced_at,
+        } if r.immy_id else None,
+        "intune": {
+            "id":          r.intune_id,
+            "upn":         r.intune_upn,
+            "os_version":  r.intune_os_version,
+            "compliance":  r.intune_compliance,
+            "mgmt_state":  r.intune_mgmt_state,
+            "enrolled_at": r.intune_enrolled_at,
+            "last_sync":   r.intune_last_sync,
+            "encrypted":   r.intune_encrypted,
+            "owner_type":  r.intune_owner_type,
+            "synced_at":   r.intune_synced_at,
+        } if r.intune_id else None,
+        "aurora": {
+            "id":          r.aurora_id,
+            "state":       r.aurora_state,
+            "agent_ver":   r.aurora_agent_ver,
+            "policy":      r.aurora_policy,
+            "ips":         json.loads(r.aurora_ips)  if r.aurora_ips  else [],
+            "macs":        json.loads(r.aurora_macs) if r.aurora_macs else [],
+            "registered":  r.aurora_registered,
+            "offline":     r.aurora_offline,
+            "dlcm":        r.aurora_dlcm,
+            "synced_at":   r.aurora_synced_at,
+        } if r.aurora_id else None,
+    }
+
+
+@router.post("/sync-all")
+async def sync_all_devices():
+    """Pull all devices from ImmyBot, Intune, and Aurora and upsert into device_records."""
+    now = datetime.now(timezone.utc).isoformat()
+
+    immy_devices,   immy_err   = await _fetch_immybot_devices()
+    intune_devices, intune_err = await _fetch_intune_devices()
+    aurora_devices, aurora_err = await _fetch_cylance_devices()
+
+    # Index each source by normalized name
+    immy_map:   dict[str, dict] = {}
+    intune_map: dict[str, dict] = {}
+    aurora_map: dict[str, dict] = {}
+
+    for d in immy_devices:
+        k = _normalize_name(d.get("name") or "")
+        if k:
+            immy_map[k] = d
+
+    for d in intune_devices:
+        k = _normalize_name(d.get("name") or "")
+        if k:
+            intune_map[k] = d
+
+    for d in aurora_devices:
+        k = _normalize_name(d.get("name") or "")
+        if k:
+            aurora_map[k] = d
+
+    all_keys = set(immy_map) | set(intune_map) | set(aurora_map)
+
+    async with AsyncSessionLocal() as session:
+        for key in all_keys:
+            immy   = immy_map.get(key)
+            intune = intune_map.get(key)
+            aurora = aurora_map.get(key)
+
+            # Resolve best-available common fields: ImmyBot > Intune > Aurora
+            name   = (immy or intune or aurora or {}).get("name") or key
+            serial = (
+                (immy   and immy.get("serialNumber"))   or
+                (intune and intune.get("serialNumber")) or
+                None
+            )
+            manufacturer = (
+                (immy   and immy.get("manufacturer"))   or
+                (intune and intune.get("manufacturer")) or
+                None
+            )
+            model = (
+                (immy   and immy.get("model"))   or
+                (intune and intune.get("model")) or
+                None
+            )
+            os_ = (
+                (immy   and immy.get("operatingSystem"))   or
+                (intune and intune.get("operatingSystem")) or
+                None
+            )
+            user_email = (
+                (immy   and immy.get("primaryUserEmail"))       or
+                (intune and intune.get("userPrincipalName"))    or
+                None
+            )
+            user_name = (
+                (immy   and immy.get("primaryUserName"))    or
+                (intune and intune.get("userDisplayName"))  or
+                None
+            )
+
+            existing = (await session.execute(
+                select(DeviceRecord).where(DeviceRecord.normalized_name == key)
+            )).scalar_one_or_none()
+
+            if not existing:
+                existing = DeviceRecord(normalized_name=key)
+                session.add(existing)
+
+            existing.name             = name
+            existing.serial_number    = serial
+            existing.manufacturer     = manufacturer
+            existing.model            = model
+            existing.operating_system = os_
+            existing.primary_user_email = user_email
+            existing.primary_user_name  = user_name
+            existing.last_updated     = now
+
+            if immy:
+                existing.immy_id        = immy.get("id")
+                existing.immy_is_online = immy.get("isOnline")
+                existing.immy_last_seen = immy.get("lastSeen")
+                existing.immy_last_boot = immy.get("lastBootTime")
+                existing.immy_tenant    = immy.get("tenantName")
+                existing.immy_url       = immy.get("immybotUrl")
+                existing.immy_ip        = immy.get("ipAddress")
+                existing.immy_mac       = immy.get("macAddress")
+                existing.immy_synced_at = now
+
+            if intune:
+                existing.intune_id          = intune.get("id")
+                existing.intune_upn         = intune.get("userPrincipalName")
+                existing.intune_os_version  = intune.get("osVersion")
+                existing.intune_compliance  = intune.get("complianceState")
+                existing.intune_mgmt_state  = intune.get("managementState")
+                existing.intune_enrolled_at = intune.get("enrolledDateTime")
+                existing.intune_last_sync   = intune.get("lastSyncDateTime")
+                existing.intune_encrypted   = intune.get("isEncrypted")
+                existing.intune_owner_type  = intune.get("managedDeviceOwnerType")
+                existing.intune_synced_at   = now
+
+            if aurora:
+                existing.aurora_id         = aurora.get("id")
+                existing.aurora_state      = aurora.get("state")
+                existing.aurora_agent_ver  = aurora.get("agentVersion")
+                existing.aurora_policy     = aurora.get("policy")
+                existing.aurora_ips        = json.dumps(aurora.get("ipAddresses") or [])
+                existing.aurora_macs       = json.dumps(aurora.get("macAddresses") or [])
+                existing.aurora_registered = aurora.get("dateRegistered")
+                existing.aurora_offline    = aurora.get("dateOffline")
+                existing.aurora_dlcm       = aurora.get("dlcmStatus")
+                existing.aurora_synced_at  = now
+
+        await session.commit()
+
+    return {
+        "synced":     len(all_keys),
+        "immy_count":   len(immy_map),
+        "intune_count": len(intune_map),
+        "aurora_count": len(aurora_map),
+        "errors":     [e for e in [immy_err, intune_err, aurora_err] if e],
+    }
+
+
+@router.get("/inventory")
+async def get_device_inventory(
+    q:      str | None = Query(default=None),
+    source: str | None = Query(default=None),  # "immy" | "intune" | "aurora"
+    limit:  int        = Query(default=500, le=2000),
+    offset: int        = Query(default=0),
+):
+    """List device records from the unified inventory DB."""
+    async with AsyncSessionLocal() as session:
+        stmt = select(DeviceRecord)
+        if q:
+            q_lower = f"%{q.lower()}%"
+            from sqlalchemy import or_, func
+            stmt = stmt.where(or_(
+                func.lower(DeviceRecord.name).like(q_lower),
+                func.lower(DeviceRecord.normalized_name).like(q_lower),
+                func.lower(DeviceRecord.serial_number).like(q_lower),
+                func.lower(DeviceRecord.primary_user_email).like(q_lower),
+                func.lower(DeviceRecord.primary_user_name).like(q_lower),
+            ))
+        if source == "immy":
+            stmt = stmt.where(DeviceRecord.immy_id.isnot(None))
+        elif source == "intune":
+            stmt = stmt.where(DeviceRecord.intune_id.isnot(None))
+        elif source == "aurora":
+            stmt = stmt.where(DeviceRecord.aurora_id.isnot(None))
+
+        total_stmt = stmt
+        from sqlalchemy import func as sqlfunc
+        count_result = await session.execute(
+            select(sqlfunc.count()).select_from(total_stmt.subquery())
+        )
+        total = count_result.scalar() or 0
+
+        stmt = stmt.order_by(DeviceRecord.name).offset(offset).limit(limit)
+        rows = (await session.execute(stmt)).scalars().all()
+
+    return {"total": total, "devices": [_record_to_dict(r) for r in rows]}
+
+
+@router.get("/inventory/{normalized_name}")
+async def get_device_record(normalized_name: str):
+    async with AsyncSessionLocal() as session:
+        row = (await session.execute(
+            select(DeviceRecord).where(DeviceRecord.normalized_name == normalized_name)
+        )).scalar_one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Device not found")
+    return _record_to_dict(row)

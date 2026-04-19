@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
-import { searchUsers, getUserDetail, getUserTickets, getUserMailboxMemberships, getUserComputers } from '../api/client.js'
+import { searchUsers, getUserDetail, getUserTickets, getUserMailboxMemberships, getUserComputers, getDirectoryUsers } from '../api/client.js'
 import { saveRecentLookup } from './Dashboard.jsx'
 import DeviceDetailModal from './DeviceDetailModal.jsx'
 
@@ -243,12 +243,23 @@ function FreshservicePanel({ email }) {
 
 /* ── User detail card ────────────────────────────────────────────────────── */
 
+const OKTA_STATUS_STYLE = {
+  ACTIVE:           { color: 'var(--green)',  bg: 'rgba(63,185,80,0.12)',   border: 'rgba(63,185,80,0.3)',   label: '● Active' },
+  LOCKED_OUT:       { color: '#ef4444',       bg: 'rgba(239,68,68,0.12)',   border: 'rgba(239,68,68,0.3)',   label: '🔒 Locked Out' },
+  SUSPENDED:        { color: 'var(--yellow)', bg: 'rgba(245,158,11,0.12)',  border: 'rgba(245,158,11,0.3)',  label: '⏸ Suspended' },
+  DEPROVISIONED:    { color: 'var(--text-muted)', bg: 'var(--bg-elevated)', border: 'var(--border)',         label: '○ Deprovisioned' },
+  PASSWORD_EXPIRED: { color: 'var(--yellow)', bg: 'rgba(245,158,11,0.12)',  border: 'rgba(245,158,11,0.3)',  label: '⚠ Password Expired' },
+  RECOVERY:         { color: 'var(--cyan)',   bg: 'rgba(33,212,253,0.1)',   border: 'rgba(33,212,253,0.3)',  label: '↻ Recovery' },
+  STAGED:           { color: 'var(--text-muted)', bg: 'var(--bg-elevated)', border: 'var(--border)',         label: '○ Staged' },
+}
+
 function UserDetailCard({ user }) {
   const [mailboxes, setMailboxes]           = useState(null)
   const [mailboxLoading, setMailboxLoading] = useState(true)
   const [computers, setComputers]           = useState(null)
   const [computersLoading, setComputersLoading] = useState(true)
-  const [deviceModal, setDeviceModal]       = useState(null) // device name string
+  const [deviceModal, setDeviceModal]       = useState(null)
+  const [oktaProfile, setOktaProfile]       = useState(null)
 
   const email = user.mail || user.userPrincipalName
 
@@ -269,6 +280,15 @@ function UserDetailCard({ user }) {
       .finally(() => setComputersLoading(false))
   }, [email])
 
+  useEffect(() => {
+    if (!email) return
+    setOktaProfile(null)
+    getDirectoryUsers({ q: email, limit: 5 }).then(r => {
+      const match = (r.data.users || []).find(u => u.email === email.toLowerCase())
+      if (match?.okta) setOktaProfile(match.okta)
+    }).catch(() => {})
+  }, [email])
+
   return (
     <div className="card" style={{ marginTop: 20 }}>
       <div className="card-header">
@@ -284,7 +304,7 @@ function UserDetailCard({ user }) {
         </span>
       </div>
       <div className="card-body">
-        <div className="grid-2" style={{ gap: 24 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: oktaProfile ? '1fr 1fr 1fr' : '1fr 1fr', gap: 24 }}>
           <div>
             <h4 style={{ marginBottom: 10, color: 'var(--text-secondary)' }}>Contact</h4>
             <InfoRow icon="📧" label="Email"    value={user.mail || user.userPrincipalName || '—'} mono />
@@ -308,6 +328,28 @@ function UserDetailCard({ user }) {
                   : 'Never'} />
             )}
           </div>
+          {oktaProfile && (() => {
+            const s = OKTA_STATUS_STYLE[oktaProfile.status] || { color: 'var(--text-muted)', bg: 'var(--bg-elevated)', border: 'var(--border)', label: oktaProfile.status || 'Unknown' }
+            return (
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                  <h4 style={{ color: 'var(--text-secondary)', margin: 0 }}>🔐 Okta</h4>
+                  <span style={{ fontSize: '0.68rem', fontWeight: 600, padding: '2px 8px', borderRadius: 20, background: s.bg, color: s.color, border: `1px solid ${s.border}` }}>
+                    {s.label}
+                  </span>
+                </div>
+                <InfoRow icon="👤" label="Login"       value={oktaProfile.login || '—'} mono />
+                <InfoRow icon="🕐" label="Last Login"  value={oktaProfile.last_login ? new Date(oktaProfile.last_login).toLocaleString() : 'Never'} />
+                <InfoRow icon="🔑" label="Pwd Changed" value={oktaProfile.password_changed ? new Date(oktaProfile.password_changed).toLocaleString() : '—'} />
+                <InfoRow icon="🆔" label="Okta ID"     value={oktaProfile.id ? oktaProfile.id.slice(0, 18) + '…' : '—'} mono />
+                {oktaProfile.synced_at && (
+                  <div style={{ marginTop: 6, fontSize: '0.68rem', color: 'var(--text-muted)' }}>
+                    Synced {formatRelativeTime(oktaProfile.synced_at)}
+                  </div>
+                )}
+              </div>
+            )
+          })()}
         </div>
 
         {/* Manager & Direct Reports */}
@@ -493,6 +535,7 @@ function UserDetailCard({ user }) {
             </div>
           </>
         )}
+
       </div>
 
       {deviceModal && (
@@ -513,6 +556,18 @@ export default function UserLookup({ initialUser = null }) {
   const [detail, setDetail]       = useState(null)
   const [detailLoading, setDetailLoading] = useState(false)
   const debounceRef = useRef(null)
+
+  const [dbCount,       setDbCount]       = useState(null)
+  const [lastSynced,    setLastSynced]    = useState(null)
+  const [accountFilter, setAccountFilter] = useState('all')
+
+  useEffect(() => {
+    getDirectoryUsers({ limit: 1 }).then(r => {
+      setDbCount(r.data.total || 0)
+      const users = r.data.users || []
+      if (users.length && users[0].last_updated) setLastSynced(users[0].last_updated)
+    }).catch(() => {})
+  }, [])
 
   useEffect(() => {
     if (initialUser) handleSelectUser(initialUser)
@@ -563,8 +618,21 @@ export default function UserLookup({ initialUser = null }) {
         {/* Search card */}
         <div className="card">
           <div className="card-header">
-            <h3>Search Active Directory</h3>
-            <span className="badge badge-cyan">Microsoft Graph</span>
+            <div className="flex items-center gap-2">
+              <h3>Search Active Directory</h3>
+              {dbCount !== null && dbCount > 0 && (
+                <span className="badge badge-gray">{dbCount.toLocaleString()} in DB</span>
+              )}
+            </div>
+            {lastSynced && (
+              <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                Synced {(() => {
+                  const d = Date.now() - new Date(lastSynced).getTime()
+                  const m = Math.floor(d / 60000), h = Math.floor(d / 3600000), dy = Math.floor(d / 86400000)
+                  return m < 1 ? 'just now' : m < 60 ? `${m}m ago` : h < 24 ? `${h}h ago` : `${dy}d ago`
+                })()}
+              </span>
+            )}
           </div>
           <div className="card-body">
             <div className="search-bar">
@@ -592,20 +660,70 @@ export default function UserLookup({ initialUser = null }) {
 
             {!loading && results.length > 0 && (
               <div style={{ marginTop: 16 }}>
-                <div className="text-xs text-muted" style={{ marginBottom: 8 }}>{results.length} result(s)</div>
-                {results.map(user => (
+                {/* Active / Disabled filter tabs */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
+                  {[
+                    { key: 'all',      label: 'All',      count: results.length },
+                    { key: 'active',   label: 'Active',   count: results.filter(u => u.accountEnabled !== false).length },
+                    { key: 'disabled', label: 'Disabled', count: results.filter(u => u.accountEnabled === false).length },
+                  ].map(tab => (
+                    <button
+                      key={tab.key}
+                      onClick={() => setAccountFilter(tab.key)}
+                      style={{
+                        fontSize: '0.75rem', padding: '3px 10px', borderRadius: 20, border: '1px solid',
+                        cursor: 'pointer', fontWeight: accountFilter === tab.key ? 600 : 400,
+                        background: accountFilter === tab.key
+                          ? tab.key === 'disabled' ? 'rgba(239,68,68,0.15)' : 'rgba(var(--cyan-rgb,56,189,248),0.15)'
+                          : 'var(--bg-elevated)',
+                        borderColor: accountFilter === tab.key
+                          ? tab.key === 'disabled' ? 'rgba(239,68,68,0.5)' : 'var(--cyan)'
+                          : 'var(--border)',
+                        color: accountFilter === tab.key
+                          ? tab.key === 'disabled' ? 'var(--red)' : 'var(--cyan)'
+                          : 'var(--text-secondary)',
+                      }}
+                    >
+                      {tab.label}
+                      {tab.count > 0 && (
+                        <span style={{ marginLeft: 5, opacity: 0.7 }}>{tab.count}</span>
+                      )}
+                    </button>
+                  ))}
+                </div>
+                {(() => {
+                  const visible = results.filter(u => {
+                    if (accountFilter === 'active')   return u.accountEnabled !== false
+                    if (accountFilter === 'disabled') return u.accountEnabled === false
+                    return true
+                  })
+                  return visible.length === 0
+                    ? <div className="text-sm text-muted" style={{ textAlign: 'center', padding: '16px 0' }}>No {accountFilter} accounts in results</div>
+                    : null
+                })()}
+                {results.filter(u => {
+                  if (accountFilter === 'active')   return u.accountEnabled !== false
+                  if (accountFilter === 'disabled') return u.accountEnabled === false
+                  return true
+                }).map(user => (
                   <div
                     key={user.id}
                     id={`user-result-${user.id}`}
                     className={`user-result-item${selected === user.id ? ' selected' : ''}`}
                     onClick={() => handleSelectUser(user)}
+                    style={{ opacity: user.accountEnabled === false ? 0.55 : 1 }}
                   >
                     <Avatar name={user.displayName} />
-                    <div>
-                      <div style={{ fontWeight: 500 }}>{user.displayName}</div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 500, display: 'flex', alignItems: 'center', gap: 6 }}>
+                        {user.displayName}
+                        {user.accountEnabled === false && (
+                          <span className="badge badge-red" style={{ fontSize: '0.6rem', padding: '1px 5px' }}>Disabled</span>
+                        )}
+                      </div>
                       <div className="text-xs text-muted">{user.mail || user.userPrincipalName}</div>
                     </div>
-                    <div className="ml-auto text-xs text-muted">{user.jobTitle}</div>
+                    <div className="ml-auto text-xs text-muted" style={{ flexShrink: 0 }}>{user.jobTitle}</div>
                   </div>
                 ))}
               </div>

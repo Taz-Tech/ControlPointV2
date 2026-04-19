@@ -15,11 +15,12 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from dotenv import load_dotenv
 from pathlib import Path
+from jose import jwt as jose_jwt, JWTError
 
 load_dotenv(dotenv_path=Path(__file__).parent / ".env", override=True)
 
 # Routes that do NOT require auth
-PUBLIC_PATHS = {"/api/health", "/api/settings/branding", "/api/settings/config", "/docs", "/openapi.json", "/redoc"}
+PUBLIC_PATHS = {"/api/health", "/api/settings/branding", "/api/settings/config", "/api/auth/sso-providers", "/api/auth/okta/callback", "/api/auth/saml/acs", "/api/auth/saml/metadata", "/docs", "/openapi.json", "/redoc"}
 
 # In-memory caches
 # token_hash → (expires_at, user_dict)
@@ -49,6 +50,23 @@ def _cache_set(token: str, user: dict):
         now = time.time()
         for k in [k for k, (exp, _) in _token_cache.items() if exp < now]:
             _token_cache.pop(k, None)
+
+
+def _try_portal_jwt(token: str) -> dict | None:
+    """Validate a portal-issued JWT (Okta SSO). Returns user dict or None."""
+    secret = os.getenv("PORTAL_JWT_SECRET", "insecure-dev-secret-change-me")
+    try:
+        payload = jose_jwt.decode(token, secret, algorithms=["HS256"])
+        if payload.get("iss") != "controlpoint":
+            return None
+        return {
+            "id":         payload.get("sub"),
+            "email":      payload.get("email", ""),
+            "first_name": payload.get("first_name", ""),
+            "last_name":  payload.get("last_name", ""),
+        }
+    except JWTError:
+        return None
 
 
 async def _get_app_token(tenant_id: str, client_id: str, client_secret: str) -> str | None:
@@ -155,6 +173,13 @@ class AzureJWTMiddleware(BaseHTTPMiddleware):
         cached = _cache_get(token)
         if cached:
             request.state.user = cached
+            return await call_next(request)
+
+        # Try portal-issued JWT first (Okta SSO users)
+        portal_user = _try_portal_jwt(token)
+        if portal_user:
+            _cache_set(token, portal_user)
+            request.state.user = portal_user
             return await call_next(request)
 
         # Verify identity via Graph /me

@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from typing import Optional, List
 
 from ..database import get_db
-from ..models import FloorMap, SeatMapping, Switch
+from ..models import FloorMap, SeatMapping, Switch, APPlacement, UnifiDevice
 
 router = APIRouter(prefix="/api/maps", tags=["maps"])
 
@@ -49,28 +49,61 @@ class SeatImportRow(BaseModel):
     switch_name: Optional[str] = None
 
 
+class APCreate(BaseModel):
+    name: str = ""
+    x_pct: float
+    y_pct: float
+    unifi_device_id: Optional[int] = None
+
+
+class APUpdate(BaseModel):
+    name: Optional[str] = None
+    x_pct: Optional[float] = None
+    y_pct: Optional[float] = None
+    unifi_device_id: Optional[int] = None
+
+
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
 def _seat_out(seat: SeatMapping) -> dict:
     return {
-        "id": seat.id,
-        "seat_label": seat.seat_label,
-        "port": seat.port,
-        "x_pct": seat.x_pct,
-        "y_pct": seat.y_pct,
-        "switch_id": seat.switch_id,
-        "switch_name": seat.switch.name if seat.switch else None,
-        "switch_ip": seat.switch.ip_address if seat.switch else None,
+        "id":               seat.id,
+        "seat_label":       seat.seat_label,
+        "port":             seat.port,
+        "x_pct":            seat.x_pct,
+        "y_pct":            seat.y_pct,
+        "switch_id":        seat.switch_id,
+        "switch_name":      seat.switch.name           if seat.switch else None,
+        "switch_ip":        seat.switch.ip_address     if seat.switch else None,
+        "unifi_device_id":  seat.switch.unifi_device_id if seat.switch else None,
+    }
+
+
+def _ap_out(ap: APPlacement) -> dict:
+    dev = ap.unifi_device
+    return {
+        "id":              ap.id,
+        "floor_map_id":    ap.floor_map_id,
+        "unifi_device_id": ap.unifi_device_id,
+        "name":            ap.name,
+        "x_pct":           ap.x_pct,
+        "y_pct":           ap.y_pct,
+        "device_name":     dev.name  if dev else None,
+        "device_ip":       dev.ip    if dev else None,
+        "device_mac":      dev.mac   if dev else None,
+        "device_model":    dev.model if dev else None,
+        "device_state":    dev.state if dev else None,
     }
 
 
 def _map_out(fm: FloorMap) -> dict:
     return {
-        "id": fm.id,
-        "name": fm.name,
+        "id":       fm.id,
+        "name":     fm.name,
         "filename": fm.filename,
         "rotation": fm.rotation,
-        "seats": [_seat_out(s) for s in fm.seats],
+        "seats":    [_seat_out(s) for s in fm.seats],
+        "aps":      [_ap_out(a) for a in (fm.ap_placements or [])],
     }
 
 
@@ -110,7 +143,10 @@ async def get_map(map_id: int, db: AsyncSession = Depends(get_db)):
     result = await db.execute(
         select(FloorMap)
         .where(FloorMap.id == map_id)
-        .options(selectinload(FloorMap.seats).selectinload(SeatMapping.switch))
+        .options(
+            selectinload(FloorMap.seats).selectinload(SeatMapping.switch),
+            selectinload(FloorMap.ap_placements).selectinload(APPlacement.unifi_device),
+        )
     )
     fm = result.scalar_one_or_none()
     if not fm:
@@ -245,6 +281,55 @@ async def import_seats(map_id: int, rows: List[SeatImportRow], db: AsyncSession 
         "updated": [_seat_out(s) for s in updated_seats],
         "unmatched": unmatched,
     }
+
+
+@router.post("/{map_id}/aps")
+async def add_ap(map_id: int, body: APCreate, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(FloorMap).where(FloorMap.id == map_id))
+    if not result.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="Floor map not found")
+    ap = APPlacement(floor_map_id=map_id, **body.model_dump())
+    db.add(ap)
+    await db.commit()
+    await db.refresh(ap)
+    result2 = await db.execute(
+        select(APPlacement).where(APPlacement.id == ap.id)
+        .options(selectinload(APPlacement.unifi_device))
+    )
+    return _ap_out(result2.scalar_one())
+
+
+@router.put("/{map_id}/aps/{ap_id}")
+async def update_ap(map_id: int, ap_id: int, body: APUpdate, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(APPlacement)
+        .where(APPlacement.id == ap_id, APPlacement.floor_map_id == map_id)
+        .options(selectinload(APPlacement.unifi_device))
+    )
+    ap = result.scalar_one_or_none()
+    if not ap:
+        raise HTTPException(status_code=404, detail="AP placement not found")
+    for field, val in body.model_dump(exclude_unset=True).items():
+        setattr(ap, field, val)
+    await db.commit()
+    result2 = await db.execute(
+        select(APPlacement).where(APPlacement.id == ap.id)
+        .options(selectinload(APPlacement.unifi_device))
+    )
+    return _ap_out(result2.scalar_one())
+
+
+@router.delete("/{map_id}/aps/{ap_id}")
+async def delete_ap(map_id: int, ap_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(APPlacement).where(APPlacement.id == ap_id, APPlacement.floor_map_id == map_id)
+    )
+    ap = result.scalar_one_or_none()
+    if not ap:
+        raise HTTPException(status_code=404, detail="AP placement not found")
+    await db.delete(ap)
+    await db.commit()
+    return {"deleted": True}
 
 
 @router.put("/{map_id}/rotation")

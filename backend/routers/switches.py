@@ -6,7 +6,11 @@ from typing import Optional
 import asyncio
 
 from ..database import get_db
-from ..models import Switch, SeatMapping
+from ..models import Switch, SeatMapping, UserRecord
+from .settings import require_permission, require_admin
+
+_require_port_reset  = require_permission("action.port_reset")
+_require_sites_edit  = require_permission("action.sites_edit")
 
 router = APIRouter(prefix="/api/switches", tags=["switches"])
 
@@ -35,26 +39,29 @@ async def list_switches(db: AsyncSession = Depends(get_db)):
     switches = result.scalars().all()
     return [
         {
-            "id": sw.id,
-            "name": sw.name,
-            "ip_address": sw.ip_address,
-            "stack_position": sw.stack_position,
+            "id":              sw.id,
+            "name":            sw.name,
+            "ip_address":      sw.ip_address,
+            "stack_position":  sw.stack_position,
+            "unifi_device_id": sw.unifi_device_id,
+            "mac_address":     sw.mac_address,
+            "model":           sw.model,
         }
         for sw in switches
     ]
 
 
 @router.post("/")
-async def add_switch(body: SwitchCreate, db: AsyncSession = Depends(get_db)):
+async def add_switch(body: SwitchCreate, _: UserRecord = Depends(_require_sites_edit), db: AsyncSession = Depends(get_db)):
     sw = Switch(**body.model_dump())
     db.add(sw)
     await db.commit()
     await db.refresh(sw)
-    return {"id": sw.id, "name": sw.name, "ip_address": sw.ip_address, "stack_position": sw.stack_position}
+    return {"id": sw.id, "name": sw.name, "ip_address": sw.ip_address, "stack_position": sw.stack_position, "unifi_device_id": None, "mac_address": None, "model": None}
 
 
 @router.delete("/{switch_id}")
-async def delete_switch(switch_id: int, db: AsyncSession = Depends(get_db)):
+async def delete_switch(switch_id: int, _: UserRecord = Depends(_require_sites_edit), db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Switch).where(Switch.id == switch_id))
     sw = result.scalar_one_or_none()
     if not sw:
@@ -65,7 +72,7 @@ async def delete_switch(switch_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/reset-port")
-async def reset_port(body: PortResetRequest):
+async def reset_port(body: PortResetRequest, _: UserRecord = Depends(_require_port_reset)):
     """
     Open an SSH session to the switch and execute a port-security reset sequence:
       1. clear port-security sticky interface <port>

@@ -107,7 +107,23 @@
       "Bash(git init:*)",
       "Bash(git add:*)",
       "Bash(git commit:*)",
-      "Bash(git config:*)"
+      "Bash(git config:*)",
+      "Bash(git checkout:*)",
+      "WebFetch(domain:cdn-ilblgal.nitrocdn.com)",
+      "Bash(git merge:*)",
+      "Bash(python -c ' *)",
+      "WebFetch(domain:blogger.googleusercontent.com)",
+      "Bash(python -c \"from routers import unifi; print\\('unifi OK'\\)\")",
+      "WebFetch(domain:claimassistsolutions.ui.com)",
+      "WebFetch(domain:developer.ui.com)",
+      "WebFetch(domain:help.ui.com)",
+      "WebFetch(domain:artofwifi.net)",
+      "WebFetch(domain:community.home-assistant.io)",
+      "WebFetch(domain:github.com)",
+      "Bash(python -c \"from routers.sso import router; from routers.directory import _fetch_okta_users; print\\('OK'\\)\")",
+      "Bash(python -c \"from routers.integrations import INTEGRATIONS; nets = {k:v for k,v in INTEGRATIONS.items\\(\\) if 'Networking' in \\(v.get\\('categories'\\) or [v.get\\('category',''\\)]\\)};  print\\('Networking integrations:', list\\(nets.keys\\(\\)\\)\\)\")",
+      "Bash(kill 60619 60620)",
+      "Bash(nohup node *)"
     ]
   }
 }

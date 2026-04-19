@@ -8,7 +8,7 @@ export const api = axios.create({
   timeout: 30000,
 })
 
-// Attach Azure AD Bearer token to every request (skipped when auth is disabled)
+// Attach Bearer token to every request (Azure AD via MSAL, or portal JWT for Okta SSO)
 api.interceptors.request.use(async (config) => {
   if (!msalInstance) return config
   const accounts = msalInstance.getAllAccounts()
@@ -25,6 +25,12 @@ api.interceptors.request.use(async (config) => {
         msalInstance.loginRedirect(loginRequest)
       }
       // For other transient errors, let the request proceed (backend returns 401)
+    }
+  } else {
+    // No MSAL account — attach portal JWT if present (Okta SSO users)
+    const portalToken = sessionStorage.getItem('portal_token')
+    if (portalToken) {
+      config.headers['Authorization'] = `Bearer ${portalToken}`
     }
   }
   return config
@@ -47,6 +53,16 @@ export const searchDevices      = ()     => api.get('/api/devices/search')
 export const lookupDevice       = (name) => api.get('/api/devices/lookup',   { params: { name } })
 export const debugDevice        = (q)    => api.get('/api/devices/debug',    { params: { q } })
 export const getDeviceExploits  = (name) => api.get('/api/devices/exploits', { params: { name } })
+
+// ── User Directory (unified DB) ───────────────────────────────────────────────
+export const syncDirectory         = ()       => api.post('/api/directory/sync', {}, { timeout: 120000 })
+export const getDirectoryUsers     = (params) => api.get('/api/directory/users', { params })
+export const getDirectoryUser      = (id)     => api.get(`/api/directory/users/${id}`)
+
+// ── Device Inventory (unified DB) ─────────────────────────────────────────────
+export const syncAllDevices      = ()              => api.post('/api/devices/sync-all', {}, { timeout: 120000 })
+export const getDeviceInventory  = (params)        => api.get('/api/devices/inventory', { params })
+export const getDeviceRecord     = (normalizedName) => api.get(`/api/devices/inventory/${encodeURIComponent(normalizedName)}`)
 
 // ── Switches ─────────────────────────────────────────────────────────────────
 export const getSwitches   = ()        => api.get('/api/switches/')
@@ -106,19 +122,29 @@ export const upsertRoomConfig   = (email, body)  => api.put(`/api/room-configs/$
 export const deleteRoomConfig   = (email)        => api.delete(`/api/room-configs/${encodeURIComponent(email)}`)
 
 // ── RingCentral ───────────────────────────────────────────────────────────────
-export const getRCPresence      = ()                        => api.get('/api/ringcentral/presence')
-export const updateRCPresence   = (extensionId, body)       => api.put(`/api/ringcentral/presence/${extensionId}`, body)
-export const getMyRCPresence    = ()                        => api.get('/api/ringcentral/me/presence')
-export const updateMyRCPresence = (body)                    => api.put('/api/ringcentral/me/presence', body)
+export const getRCPresence       = ()                        => api.get('/api/ringcentral/presence')
+export const updateRCPresence    = (extensionId, body)       => api.put(`/api/ringcentral/presence/${extensionId}`, body)
+export const getMyRCPresence     = ()                        => api.get('/api/ringcentral/me/presence')
+export const updateMyRCPresence  = (body)                    => api.put('/api/ringcentral/me/presence', body)
+export const getRCPresenceReport = (params)                  => api.get('/api/ringcentral/presence/report', { params })
+export const getRCWidgetConfig   = ()                        => api.get('/api/ringcentral/widget-config')
+export const getRCBusinessHours  = ()                        => api.get('/api/ringcentral/business-hours')
+export const saveRCBusinessHours = (body)                    => api.put('/api/ringcentral/business-hours', body)
 
 // ── Integrations ──────────────────────────────────────────────────────────────
 export const getIntegrations          = ()              => api.get('/api/integrations/')
 export const updateIntegration        = (id, values)    => api.put(`/api/integrations/${id}`, { values })
+export const toggleIntegration        = (id, disable)   => api.put(`/api/integrations/${id}/enabled`, { enabled: !disable })
 export const testIntegration          = (id)            => api.post(`/api/integrations/${id}/test`)
 export const uploadIntegrationFile    = (uploadUrl, file) => {
   const fd = new FormData()
   fd.append('file', file)
   return api.post(uploadUrl, fd)
+}
+export const uploadIntegrationLogo    = (id, file) => {
+  const fd = new FormData()
+  fd.append('file', file)
+  return api.post(`/api/integrations/${id}/upload-logo`, fd)
 }
 
 // ── Sites ─────────────────────────────────────────────────────────────────────
@@ -129,6 +155,20 @@ export const addSwitchToSite      = (siteId, switchId)    => api.post(`/api/site
 export const removeSwitchFromSite = (siteId, switchId)    => api.delete(`/api/sites/${siteId}/switches/${switchId}`)
 export const addMapToSite         = (siteId, mapId)       => api.post(`/api/sites/${siteId}/maps/${mapId}`)
 export const removeMapFromSite    = (siteId, mapId)       => api.delete(`/api/sites/${siteId}/maps/${mapId}`)
+export const linkUnifiHost        = (siteId, hostId)      => api.patch(`/api/sites/${siteId}/unifi-host`, { unifi_host_id: hostId || null })
+export const setSiteUnifiSiteName = (siteId, siteName)    => api.patch(`/api/sites/${siteId}/controller`, { unifi_site_name: siteName || null })
+
+// ── UniFi ─────────────────────────────────────────────────────────────────────
+export const getUnifiHosts           = ()              => api.get('/api/unifi/hosts')
+export const syncUnifiDevices        = (siteId)        => api.post(`/api/unifi/sites/${siteId}/sync`)
+export const getPortStatuses         = (siteId, mapId) => api.get(`/api/unifi/sites/${siteId}/port-statuses`, { params: { map_id: mapId } })
+export const getPortClients          = (siteId, mapId) => api.get(`/api/unifi/sites/${siteId}/port-clients`,   { params: { map_id: mapId } })
+export const getDevicePorts          = (siteId, unifiDeviceId) => api.get(`/api/unifi/sites/${siteId}/devices/${unifiDeviceId}/ports`)
+export const getDeviceClients        = (siteId, unifiDeviceId) => api.get(`/api/unifi/sites/${siteId}/devices/${unifiDeviceId}/clients`)
+export const getUnifiDevices         = (hostId)        => api.get(`/api/unifi/hosts/${hostId}/devices`)
+export const getHostConfigs          = ()              => api.get('/api/unifi/host-configs')
+export const saveHostConfig          = (hostId, body)  => api.put(`/api/unifi/host-configs/${hostId}`, body)
+export const getHostControllerSites  = (hostId)        => api.get(`/api/unifi/host-configs/${hostId}/controller-sites`)
 
 // ── Maps ──────────────────────────────────────────────────────────────────────
 // ── Zones ─────────────────────────────────────────────────────────────────────
@@ -150,7 +190,17 @@ export const uploadMap     = (name, file) => {
 }
 export const deleteMap     = (id)          => api.delete(`/api/maps/${id}`)
 export const updateMapRotation = (id, rotation) => api.put(`/api/maps/${id}/rotation`, { rotation })
+export const addAP    = (mapId, body)        => api.post(`/api/maps/${mapId}/aps`, body)
+export const updateAP = (mapId, apId, body)  => api.put(`/api/maps/${mapId}/aps/${apId}`, body)
+export const deleteAP = (mapId, apId)        => api.delete(`/api/maps/${mapId}/aps/${apId}`)
 export const addSeat       = (mapId, body) => api.post(`/api/maps/${mapId}/seats`, body)
 export const updateSeat    = (mapId, seatId, body) => api.put(`/api/maps/${mapId}/seats/${seatId}`, body)
 export const deleteSeat    = (mapId, seatId)       => api.delete(`/api/maps/${mapId}/seats/${seatId}`)
 export const importSeats   = (mapId, rows)         => api.post(`/api/maps/${mapId}/seats/import`, rows, { timeout: 120000 })
+
+// ── Roles ─────────────────────────────────────────────────────────────────────
+export const getRoles          = ()            => api.get('/api/roles/')
+export const getPermissions    = ()            => api.get('/api/roles/permissions')
+export const createRole        = (body)        => api.post('/api/roles/', body)
+export const updateRole        = (name, body)  => api.put(`/api/roles/${name}`, body)
+export const deleteRole        = (name)        => api.delete(`/api/roles/${name}`)

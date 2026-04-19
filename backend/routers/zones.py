@@ -1,10 +1,11 @@
+import json
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 
 from ..database import get_db
 from ..models import Zone, SeatAssignment, SeatMapping
@@ -17,22 +18,26 @@ router = APIRouter(prefix="/api/zones", tags=["zones"])
 class ZoneCreate(BaseModel):
     name: str
     team_name: str = ""
+    zone_type: str = ""
     color: str = "#3b82f6"
     floor_map_id: int
     x1_pct: float
     y1_pct: float
     x2_pct: float
     y2_pct: float
+    points: Optional[List] = None   # [{x, y}, ...] polygon vertices
 
 
 class ZoneUpdate(BaseModel):
     name: Optional[str] = None
     team_name: Optional[str] = None
+    zone_type: Optional[str] = None
     color: Optional[str] = None
     x1_pct: Optional[float] = None
     y1_pct: Optional[float] = None
     x2_pct: Optional[float] = None
     y2_pct: Optional[float] = None
+    points: Optional[List] = None   # [{x, y}, ...] polygon vertices
 
 
 class AssignmentUpsert(BaseModel):
@@ -48,12 +53,14 @@ def _zone_out(zone: Zone) -> dict:
         "id":           zone.id,
         "name":         zone.name,
         "team_name":    zone.team_name,
+        "zone_type":    zone.zone_type or "",
         "color":        zone.color,
         "floor_map_id": zone.floor_map_id,
         "x1_pct":       zone.x1_pct,
         "y1_pct":       zone.y1_pct,
         "x2_pct":       zone.x2_pct,
         "y2_pct":       zone.y2_pct,
+        "points":       json.loads(zone.points) if zone.points else None,
     }
 
 
@@ -85,12 +92,14 @@ async def create_zone(body: ZoneCreate, db: AsyncSession = Depends(get_db)):
     zone = Zone(
         name=body.name.strip(),
         team_name=body.team_name.strip(),
+        zone_type=body.zone_type.strip(),
         color=body.color,
         floor_map_id=body.floor_map_id,
         x1_pct=body.x1_pct,
         y1_pct=body.y1_pct,
         x2_pct=body.x2_pct,
         y2_pct=body.y2_pct,
+        points=json.dumps(body.points) if body.points else None,
     )
     db.add(zone)
     await db.commit()
@@ -108,6 +117,8 @@ async def update_zone(zone_id: int, body: ZoneUpdate, db: AsyncSession = Depends
         zone.name = body.name.strip()
     if body.team_name is not None:
         zone.team_name = body.team_name.strip()
+    if body.zone_type is not None:
+        zone.zone_type = body.zone_type.strip()
     if body.color is not None:
         zone.color = body.color
     if body.x1_pct is not None:
@@ -118,6 +129,8 @@ async def update_zone(zone_id: int, body: ZoneUpdate, db: AsyncSession = Depends
         zone.x2_pct = body.x2_pct
     if body.y2_pct is not None:
         zone.y2_pct = body.y2_pct
+    if body.points is not None:
+        zone.points = json.dumps(body.points)
     await db.commit()
     await db.refresh(zone)
     return _zone_out(zone)

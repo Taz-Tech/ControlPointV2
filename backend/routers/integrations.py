@@ -5,16 +5,43 @@ import base64
 import httpx
 from datetime import datetime, timedelta
 from pathlib import Path
-from fastapi import APIRouter, HTTPException, UploadFile, File, Depends
+from fastapi import APIRouter, HTTPException, UploadFile, File, Depends, Request
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from jose import jwt as jose_jwt
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from ..database import get_db
+from ..models import UserRecord
+from .settings import require_admin
 
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
 
 ENV_PATH  = Path(__file__).parent.parent / ".env"
 CERTS_DIR = Path(__file__).parent.parent / "certs"
 CERTS_DIR.mkdir(parents=True, exist_ok=True)
+
+LOGOS_DIR = Path(__file__).parent.parent / "uploads" / "integration-logos"
+LOGOS_DIR.mkdir(parents=True, exist_ok=True)
+
+ALLOWED_LOGO_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".svg", ".gif"}
+
+
+def _get_logo_url(integration_id: str) -> str | None:
+    key = f"{integration_id.upper()}_LOGO_PATH"
+    path_str = os.environ.get(key, "") or _read_env_raw().get(key, "")
+    path_str = path_str.strip()
+    if not path_str:
+        return None
+    p = Path(path_str)
+    if not p.is_file():
+        return None
+    try:
+        rel = p.relative_to(Path(__file__).parent.parent / "uploads")
+        mtime = int(p.stat().st_mtime)
+        return f"/uploads/{rel.as_posix()}?t={mtime}"
+    except ValueError:
+        return None
 
 # ── Integration definitions ───────────────────────────────────────────────────
 
@@ -24,11 +51,62 @@ INTEGRATIONS = {
         "name":        "Microsoft 365",
         "description": "Azure AD & Graph API — powers User Lookup, Shared Mailboxes, and authentication.",
         "icon":        "☁️",
+        "category":    "Directory Sync",
+        "categories":  ["Directory Sync", "Single Sign-On (SSO)", "Calendars"],
         "docs_url":    "https://portal.azure.com",
         "fields": [
             {"key": "AZURE_TENANT_ID",     "label": "Tenant ID",     "secret": False},
             {"key": "AZURE_CLIENT_ID",     "label": "Client ID",     "secret": False},
             {"key": "AZURE_CLIENT_SECRET", "label": "Client Secret", "secret": True},
+        ],
+        "setup_guide": [
+            {
+                "title": "Register an application in Azure AD",
+                "body":  "Go to portal.azure.com → Azure Active Directory → App registrations → New registration. Give it a name (e.g. \"ControlPoint\") and click Register.",
+            },
+            {
+                "title": "Copy your Tenant ID and Client ID",
+                "body":  "On the app's Overview page, copy the Directory (tenant) ID and Application (client) ID into the fields on the right.",
+            },
+            {
+                "title": "Grant API permissions",
+                "body":  "Go to API permissions → Add a permission → Microsoft Graph → Application permissions. Add: User.Read.All, Group.Read.All, Mail.ReadBasic.All, Calendars.Read. Then click Grant admin consent for your tenant.",
+            },
+            {
+                "title": "Create a client secret",
+                "body":  "Go to Certificates & secrets → New client secret. Set an expiry and click Add. Copy the Value immediately — it will not be shown again.",
+            },
+        ],
+    },
+    "workday": {
+        "id":          "workday",
+        "name":        "Workday",
+        "description": "Workday HCM — syncs employee directory, org structure, and worker profiles.",
+        "icon":        "📋",
+        "category":    "Directory Sync",
+        "docs_url":    "https://developer.workday.com",
+        "fields": [
+            {"key": "WORKDAY_TENANT",        "label": "Tenant Name",    "secret": False, "placeholder": "mycompany"},
+            {"key": "WORKDAY_CLIENT_ID",     "label": "Client ID",      "secret": False},
+            {"key": "WORKDAY_CLIENT_SECRET", "label": "Client Secret",  "secret": True},
+        ],
+        "setup_guide": [
+            {
+                "title": "Find your tenant name",
+                "body":  "Your tenant name is the subdomain in your Workday URL. For example, if your URL is https://wd2.myworkday.com/mycompany, your tenant name is \"mycompany\".",
+            },
+            {
+                "title": "Create an Integration System User (ISU)",
+                "body":  "In Workday, search for \"Create Integration System User\". Set a username, assign a password, and check \"Do Not Allow UI Sessions\" to restrict the account to API use only.",
+            },
+            {
+                "title": "Assign security permissions",
+                "body":  "Search for \"Create Security Group\" and create an Integration System Security Group. Add the ISU to the group, then assign domain security policies that allow access to worker and org data (e.g. Worker Data, Organization Data).",
+            },
+            {
+                "title": "Register an API Client",
+                "body":  "Search for \"Register API Client for Integrations\". Give it a name, set the grant type to Client Credentials, and assign your security group. Copy the Client ID and Client Secret shown — the secret will not be displayed again.",
+            },
         ],
     },
     "freshservice": {
@@ -36,10 +114,21 @@ INTEGRATIONS = {
         "name":        "Freshservice",
         "description": "IT service management — powers ticket lookup and creation.",
         "icon":        "🎫",
+        "category":    "Facility Ticketing",
         "docs_url":    "https://api.freshservice.com",
         "fields": [
             {"key": "FRESHSERVICE_DOMAIN",  "label": "Domain",  "secret": False, "placeholder": "company.freshservice.com"},
             {"key": "FRESHSERVICE_API_KEY", "label": "API Key", "secret": True},
+        ],
+        "setup_guide": [
+            {
+                "title": "Find your Freshservice domain",
+                "body":  "Your domain is the subdomain you use to log in — e.g. company.freshservice.com. Enter it without https://.",
+            },
+            {
+                "title": "Generate an API key",
+                "body":  "Log in to Freshservice as an admin. Click your avatar in the top-right → Profile Settings → scroll to \"Your API Key\" and copy it.",
+            },
         ],
     },
     "immybot": {
@@ -47,6 +136,7 @@ INTEGRATIONS = {
         "name":        "ImmyBot",
         "description": "Endpoint management — powers device lookup and computer management.",
         "icon":        "🤖",
+        "category":    "Asset",
         "docs_url":    "https://docs.immy.bot",
         "fields": [
             {"key": "IMMYBOT_BASE_URL",     "label": "Base URL",      "secret": False, "placeholder": "https://company.immy.bot"},
@@ -55,17 +145,81 @@ INTEGRATIONS = {
             {"key": "IMMYBOT_TENANT_ID",    "label": "Tenant ID",     "secret": False},
             {"key": "IMMYBOT_APP_ID",       "label": "App ID",        "secret": False, "placeholder": "https://company.immy.bot"},
         ],
+        "setup_guide": [
+            {
+                "title": "Find your Base URL",
+                "body":  "Your Base URL is the full address of your ImmyBot instance, e.g. https://company.immy.bot.",
+            },
+            {
+                "title": "Create an OAuth application in ImmyBot",
+                "body":  "In ImmyBot go to Settings → OAuth → Add OAuth Application. Set the grant type to Client Credentials. Copy the Client ID and Client Secret.",
+            },
+            {
+                "title": "Get your Azure Tenant ID",
+                "body":  "In Azure Portal go to Azure Active Directory → Overview and copy the Tenant ID.",
+            },
+            {
+                "title": "Get the ImmyBot App ID from Azure",
+                "body":  "In Azure Portal go to Enterprise Applications, search for your ImmyBot instance, and copy the Application (client) ID from its Properties page.",
+            },
+        ],
     },
     "arcticwolf": {
         "id":          "arcticwolf",
         "name":        "Arctic Wolf Aurora (Cylance)",
         "description": "Cylance/Aurora EDR — pulls security alerts, threats, and device observations.",
         "icon":        "🐺",
+        "category":    "Security",
         "docs_url":    "https://docs.arcticwolf.com/bundle/Aurora-User-API-guide/page/",
         "fields": [
             {"key": "CYLANCE_TENANT_ID",  "label": "Tenant ID",           "secret": False},
             {"key": "CYLANCE_APP_ID",     "label": "Application ID",      "secret": False},
             {"key": "CYLANCE_APP_SECRET", "label": "Application Secret",  "secret": True},
+        ],
+        "setup_guide": [
+            {
+                "title": "Log in to the Cylance console",
+                "body":  "Go to protect.cylance.com and sign in with your administrator credentials.",
+            },
+            {
+                "title": "Create a custom API application",
+                "body":  "Navigate to Settings → Integrations → Custom Applications → Add New Application. Give it a descriptive name (e.g. \"ControlPoint\") and click Save.",
+            },
+            {
+                "title": "Copy your credentials",
+                "body":  "After creation, copy the Tenant ID, Application ID, and Application Secret. The secret is shown only once — copy it immediately before leaving the page.",
+            },
+        ],
+    },
+    "ccure": {
+        "id":          "ccure",
+        "name":        "C•CURE 9000",
+        "description": "Software House C•CURE 9000 — pulls badge holders, access levels, and door/reader inventory.",
+        "icon":        "🪪",
+        "category":    "Badges & Access Control Systems",
+        "docs_url":    "https://www.swhouse.com/products/software_CCURE9000.aspx",
+        "fields": [
+            {"key": "CCURE_SERVER_URL", "label": "Server URL",  "secret": False, "placeholder": "https://ccure.company.com:8443"},
+            {"key": "CCURE_USERNAME",   "label": "Username",    "secret": False},
+            {"key": "CCURE_PASSWORD",   "label": "Password",    "secret": True},
+        ],
+        "setup_guide": [
+            {
+                "title": "Find your C•CURE server URL",
+                "body":  "Your server URL is the address of the C•CURE 9000 Application Server running the Victor Web Service, e.g. https://ccure.company.com:8443. Include the port if it is not the default 443.",
+            },
+            {
+                "title": "Verify the Victor Web Service is running",
+                "body":  "On the C•CURE Application Server, open Windows Services and confirm that \"Victor Web Service\" is running. This is required for all REST API access.",
+            },
+            {
+                "title": "Create a dedicated operator account",
+                "body":  "In the C•CURE 9000 Administration Workstation, create a dedicated operator account for API access. Assign it the minimum privileges needed to read cardholder, badge, and door data. Avoid using a shared admin account.",
+            },
+            {
+                "title": "Enter your credentials",
+                "body":  "Enter the server URL, operator username, and password. The API authenticates via the Victor Web Service login endpoint and returns a session token used for subsequent requests.",
+            },
         ],
     },
     "logitech_sync": {
@@ -73,11 +227,30 @@ INTEGRATIONS = {
         "name":        "Logitech Sync",
         "description": "Logitech Sync Portal — pulls meeting room spaces and their assigned devices.",
         "icon":        "📹",
+        "category":    "Video Conferencing",
         "docs_url":    "https://developer.logitech.com/en-us/sync/",
         "fields": [
             {"key": "LOGITECH_SYNC_CERT_PATH", "label": "Client Certificate", "secret": False, "type": "file", "upload_url": "/api/integrations/logitech_sync/upload-cert", "accept": ".pem,.crt,.cer"},
             {"key": "LOGITECH_SYNC_KEY_PATH",  "label": "Private Key",        "secret": False, "type": "file", "upload_url": "/api/integrations/logitech_sync/upload-key",  "accept": ".pem,.key"},
             {"key": "LOGITECH_SYNC_ORG_ID",    "label": "Org ID",             "secret": False},
+        ],
+        "setup_guide": [
+            {
+                "title": "Generate a client certificate and private key",
+                "body":  "Run this OpenSSL command to create a self-signed certificate pair:\nopenssl req -x509 -newkey rsa:4096 -keyout client.key -out client.crt -days 365 -nodes -subj \"/CN=ControlPoint\"",
+            },
+            {
+                "title": "Register your certificate in the Logitech Sync Portal",
+                "body":  "Log in to sync.logitech.com → Organization Settings → API Access → upload your client.crt file.",
+            },
+            {
+                "title": "Find your Org ID",
+                "body":  "Your Org ID is visible under Organization Settings in the Logitech Sync Portal.",
+            },
+            {
+                "title": "Upload your certificate files here",
+                "body":  "Use the upload buttons in the Connection Details section to upload your client.crt (Client Certificate) and client.key (Private Key).",
+            },
         ],
     },
     "intune": {
@@ -85,11 +258,146 @@ INTEGRATIONS = {
         "name":        "Microsoft Intune",
         "description": "Microsoft Intune MDM — pulls managed device inventory, compliance states, and OS breakdown.",
         "icon":        "💻",
+        "category":    "Asset",
         "docs_url":    "https://learn.microsoft.com/en-us/graph/api/resources/intune-devices-manageddevice",
         "fields": [
             {"key": "INTUNE_TENANT_ID",     "label": "Tenant ID",     "secret": False},
             {"key": "INTUNE_CLIENT_ID",     "label": "Client ID",     "secret": False},
             {"key": "INTUNE_CLIENT_SECRET", "label": "Client Secret", "secret": True},
+        ],
+        "setup_guide": [
+            {
+                "title": "Register an application in Azure AD",
+                "body":  "Go to portal.azure.com → Azure Active Directory → App registrations → New registration. Give it a name and click Register.",
+            },
+            {
+                "title": "Copy your Tenant ID and Client ID",
+                "body":  "On the app's Overview page, copy the Directory (tenant) ID and Application (client) ID into the fields on the right.",
+            },
+            {
+                "title": "Grant Intune API permissions",
+                "body":  "Go to API permissions → Add a permission → Microsoft Graph → Application permissions. Add: DeviceManagementManagedDevices.Read.All. Click Grant admin consent.",
+            },
+            {
+                "title": "Create a client secret",
+                "body":  "Go to Certificates & secrets → New client secret. Copy the Value immediately after creation — it will not be shown again.",
+            },
+        ],
+    },
+    "papercut": {
+        "id":          "papercut",
+        "name":        "PaperCut",
+        "description": "PaperCut print management — pulls printer inventory and status for map placement.",
+        "icon":        "🖨️",
+        "category":    "Asset",
+        "docs_url":    "https://www.papercut.com/help/manuals/ng-mf/applicationserver/tools/rest-api/",
+        "fields": [
+            {"key": "PAPERCUT_SERVER_URL", "label": "Server URL", "secret": False, "placeholder": "https://papercut.company.com:9191"},
+            {"key": "PAPERCUT_AUTH_TOKEN", "label": "Auth Token", "secret": True},
+        ],
+        "setup_guide": [
+            {
+                "title": "Find your PaperCut server URL",
+                "body":  "Your server URL is the address of your PaperCut Application Server including the port, e.g. https://papercut.company.com:9191. For cloud-hosted instances use port 9192.",
+            },
+            {
+                "title": "Enable the Public REST API",
+                "body":  "In the PaperCut admin console go to Options → Advanced → Enable Public API and make sure the toggle is on.",
+            },
+            {
+                "title": "Copy your Auth Token",
+                "body":  "In the PaperCut admin console go to Options → Advanced → Auth Token. Copy the token shown — this is the shared secret used to authenticate API requests.",
+            },
+        ],
+    },
+    "unifi": {
+        "id":          "unifi",
+        "name":        "UniFi Network",
+        "description": "Ubiquiti UniFi Site Manager API — pulls all managed sites, hosts, and device data across your entire UniFi account.",
+        "icon":        "📡",
+        "category":    "Networking",
+        "categories":  ["Networking"],
+        "docs_url":    "https://developer.ui.com",
+        "fields": [
+            {"key": "UNIFI_API_KEY", "label": "API Key", "secret": True},
+        ],
+        "setup_guide": [
+            {
+                "title": "Sign in to UniFi Site Manager",
+                "body":  "Go to unifi.ui.com and sign in with your Ubiquiti account. This account must have access to all the sites you want to manage.",
+            },
+            {
+                "title": "Navigate to the API section",
+                "body":  "Go to the API section (GA) or Settings → API Keys (EA).",
+            },
+            {
+                "title": "Create a new API key",
+                "body":  "Click \"Create New API Key\", give it a name (e.g. \"ControlPoint\"), and copy the generated key immediately — it will only be shown once.",
+            },
+        ],
+    },
+    "meraki": {
+        "id":          "meraki",
+        "name":        "Cisco Meraki",
+        "description": "Cisco Meraki Dashboard API — inventory and monitor all Meraki network devices, clients, and organizations from a single pane.",
+        "icon":        "🌐",
+        "category":    "Networking",
+        "categories":  ["Networking"],
+        "docs_url":    "https://developer.cisco.com/meraki/api-v1/",
+        "fields": [
+            {"key": "MERAKI_API_KEY",      "label": "API Key",          "secret": True},
+            {"key": "MERAKI_ORG_ID",       "label": "Organization ID",  "secret": False, "optional": True, "placeholder": "Leave blank to auto-detect from API key"},
+            {"key": "MERAKI_BASE_URL",     "label": "Base URL",         "secret": False, "optional": True, "placeholder": "https://api.meraki.com/api/v1  (leave blank for cloud)"},
+        ],
+        "setup_guide": [
+            {
+                "title": "Enable API access in Meraki Dashboard",
+                "body":  "Sign in to dashboard.meraki.com → Organization → Settings → Dashboard API access → check \"Enable access to the Cisco Meraki Dashboard API\" and save.",
+            },
+            {
+                "title": "Generate an API key",
+                "body":  "In the Dashboard, click your account avatar (top-right) → My profile → scroll to \"API access\" → Generate new API key. Copy the key immediately — it is shown only once. The key inherits the permissions of the account that created it.",
+            },
+            {
+                "title": "Find your Organization ID (optional)",
+                "body":  "If you manage multiple Meraki organizations and want to restrict ControlPoint to one, go to Organization → Settings and copy the Organization ID shown in the URL (a numeric value). Leave the field blank to auto-detect based on your API key.",
+            },
+            {
+                "title": "On-premises Dashboard (optional)",
+                "body":  "If you are running Meraki on a private cloud or using a regional API endpoint, enter the custom Base URL. Otherwise leave it blank and ControlPoint will use the Cisco cloud API at api.meraki.com.",
+            },
+        ],
+    },
+    "fortinet": {
+        "id":          "fortinet",
+        "name":        "Fortinet",
+        "description": "Fortinet FortiManager REST API — centrally manage FortiGate firewall policies, device inventory, and security fabric from ControlPoint.",
+        "icon":        "🛡️",
+        "category":    "Networking",
+        "categories":  ["Networking", "Security"],
+        "docs_url":    "https://docs.fortinet.com/document/fortimanager/latest/json-api-reference/",
+        "fields": [
+            {"key": "FORTINET_HOST",       "label": "FortiManager Host", "secret": False, "placeholder": "https://fortimanager.company.com"},
+            {"key": "FORTINET_API_KEY",    "label": "API Key",           "secret": True},
+            {"key": "FORTINET_VERIFY_SSL", "label": "Verify SSL",        "secret": False, "optional": True, "placeholder": "true  (set false only for self-signed certs in lab environments)"},
+        ],
+        "setup_guide": [
+            {
+                "title": "Create a dedicated API admin account in FortiManager",
+                "body":  "In FortiManager go to System Settings → Administrators → Create New. Set the admin type to \"REST API\" and assign a JSON API access profile (at minimum read access to Device Manager and Policy & Objects). Note the username — you will need it to generate an API key.",
+            },
+            {
+                "title": "Generate an API key (token)",
+                "body":  "After creating the REST API admin, FortiManager displays a one-time API key (bearer token). Copy it immediately — it cannot be retrieved later. If you lose it, delete the admin account and recreate it.",
+            },
+            {
+                "title": "Enter your FortiManager host",
+                "body":  "Enter the full URL of your FortiManager appliance including the protocol, e.g. https://fortimanager.company.com or https://192.168.1.100. Do not include a trailing slash.",
+            },
+            {
+                "title": "SSL verification",
+                "body":  "If your FortiManager uses a publicly trusted TLS certificate leave Verify SSL blank (defaults to true). For lab or self-signed certificate environments, set it to false. Always use a trusted cert in production.",
+            },
         ],
     },
     "ringcentral": {
@@ -97,11 +405,95 @@ INTEGRATIONS = {
         "name":        "RingCentral",
         "description": "RingCentral telephony — monitor user presence and manage DND status across teams.",
         "icon":        "📞",
+        "category":    "Employee Experience",
         "docs_url":    "https://developers.ringcentral.com",
         "fields": [
             {"key": "RC_CLIENT_ID",     "label": "Client ID",     "secret": False},
             {"key": "RC_CLIENT_SECRET", "label": "Client Secret", "secret": True},
             {"key": "RC_JWT",           "label": "JWT Token",     "secret": True,  "placeholder": "Private app JWT from RingCentral Developer Console"},
+        ],
+        "setup_guide": [
+            {
+                "title": "Create an app in the RingCentral Developer Console",
+                "body":  "Go to developers.ringcentral.com → My Apps → Create App. Choose the \"Server/Bot\" app type and select JWT as the authentication method. Add the ReadPresence scope (and any others your use case requires).",
+            },
+            {
+                "title": "Copy your Client ID and Client Secret",
+                "body":  "From the app's Credentials tab, copy the Client ID and Client Secret.",
+            },
+            {
+                "title": "Generate a personal JWT token",
+                "body":  "In the Developer Console, go to your account menu → Credentials → Create JWT. This token authenticates server-to-server requests — treat it as a secret and do not share it.",
+            },
+        ],
+    },
+    "okta": {
+        "id":          "okta",
+        "name":        "Okta",
+        "description": "Okta identity platform — directory sync for user/group data and SSO via SAML 2.0.",
+        "icon":        "🔐",
+        "category":    "Directory Sync",
+        "categories":  ["Directory Sync", "Single Sign-On (SSO)"],
+        "docs_url":    "https://developer.okta.com",
+        "fields": [
+            {"key": "OKTA_DOMAIN",             "label": "Okta Domain",    "secret": False, "placeholder": "company.okta.com"},
+            {"key": "OKTA_API_TOKEN",          "label": "API Token",      "secret": True},
+            {"key": "OKTA_SAML_IDP_SSO_URL",  "label": "IdP SSO URL",    "secret": False, "optional": True, "placeholder": "https://company.okta.com/app/.../sso/saml"},
+            {"key": "OKTA_SAML_IDP_ENTITY_ID","label": "IdP Entity ID",  "secret": False, "optional": True, "placeholder": "http://www.okta.com/..."},
+            {"key": "OKTA_SAML_IDP_CERT",     "label": "IdP Certificate","secret": True,  "optional": True},
+        ],
+        "setup_guide": [
+            {
+                "title": "Find your Okta domain",
+                "body":  "Your Okta domain is the subdomain you use to sign in, e.g. company.okta.com. Enter it without https://. If you are on the Okta Preview sandbox it ends in .oktapreview.com.",
+            },
+            {
+                "title": "Create an API token for directory sync",
+                "body":  "Sign in to your Okta Admin Console → Security → API → Tokens → Create Token. Give it a name (e.g. \"ControlPoint\") and copy the token immediately — it is shown only once. The account used must have at minimum Read-Only Admin or a custom role with Users and Groups read permission.",
+            },
+            {
+                "title": "Create a SAML 2.0 app for SSO (optional)",
+                "body":  "In the Okta Admin Console go to Applications → Create App Integration → SAML 2.0.\n\nSet these SP values:\n• Single sign-on URL (ACS): {your_portal_url}/api/auth/saml/acs\n• Audience URI (Entity ID): {your_portal_url}/api/auth/saml/metadata\n• Name ID format: EmailAddress\n• App username: Email\n\nAfter saving, open the app's Sign On tab → View SAML Setup Instructions to copy the IdP SSO URL, IdP Entity ID, and X.509 Certificate.",
+            },
+            {
+                "title": "Assign the SAML app to users or groups",
+                "body":  "On the app's Assignments tab, assign the application to the users or groups who should be able to sign in via SSO. Users not assigned will receive an access-denied error.",
+            },
+            {
+                "title": "Set a portal JWT secret",
+                "body":  "After Okta authenticates a user, ControlPoint issues its own signed session token. Add PORTAL_JWT_SECRET=<a long random string> to your .env file. Generate one with:\n  openssl rand -hex 32",
+            },
+        ],
+    },
+    "ringcentral_embeddable": {
+        "id":          "ringcentral_embeddable",
+        "name":        "RingCentral Phone Widget",
+        "description": "Embed the RingCentral softphone directly in the portal so employees can make and receive calls without leaving the browser.",
+        "icon":        "☎️",
+        "category":    "Employee Experience",
+        "docs_url":    "https://developers.ringcentral.com/guide/embeddable",
+        "fields": [
+            {"key": "RC_WIDGET_CLIENT_ID",     "label": "Widget Client ID",     "secret": False},
+            {"key": "RC_WIDGET_CLIENT_SECRET", "label": "Widget Client Secret", "secret": True},
+            {"key": "RC_WIDGET_SERVER_URL",    "label": "Server URL",           "secret": False, "optional": True, "placeholder": "https://platform.ringcentral.com  (or https://platform.devtest.ringcentral.com for Sandbox)"},
+        ],
+        "setup_guide": [
+            {
+                "title": "Create a Browser-based app in the RingCentral Developer Console",
+                "body":  "Go to developers.ringcentral.com → My Apps → Create App. Choose the \"Browser-based app\" (or \"Web\" / \"Authorization Code + PKCE\") app type. This is separate from the JWT app used for presence monitoring.",
+            },
+            {
+                "title": "Add your redirect URI",
+                "body":  "Under Auth → Redirect URIs, add:\nhttps://controlpoint.claimassistsolutions.com/rc-oauth.html\nhttp://localhost:5173/rc-oauth.html (for local dev)\n\nThis page handles the OAuth callback and passes the auth code back to the widget.",
+            },
+            {
+                "title": "Set required scopes",
+                "body":  "Add these OAuth scopes: VoIP Calling, ReadAccounts, ReadCallLog, ReadPresence, Contacts. Click Save.",
+            },
+            {
+                "title": "Copy your Widget Client ID and Secret",
+                "body":  "From the app's Credentials tab, copy the Client ID and Client Secret and enter them here. Once saved, the softphone widget will appear for all users who have RC Widget access enabled in Settings → Users.",
+            },
         ],
     },
 }
@@ -162,11 +554,37 @@ def _is_configured(integration_id: str) -> bool:
 
 # ── Schemas ───────────────────────────────────────────────────────────────────
 
+def _is_enabled(integration_id: str) -> bool:
+    key = f"{integration_id.upper()}_ENABLED"
+    val = _read_env_raw().get(key, "true").strip().lower()
+    return val != "false"
+
+
 class IntegrationUpdate(BaseModel):
     values: dict[str, str]
 
+class IntegrationEnabled(BaseModel):
+    enabled: bool
+
 
 # ── Routes ────────────────────────────────────────────────────────────────────
+
+def _resolve_portal_url() -> str:
+    origins = os.getenv("ALLOWED_ORIGINS", "")
+    for o in origins.split(","):
+        o = o.strip()
+        if o.startswith("https://"):
+            return o.rstrip("/")
+    return "https://your-portal-domain.com"
+
+
+def _inject_portal_url(guide: list[dict]) -> list[dict]:
+    url = _resolve_portal_url()
+    return [
+        {**step, "body": step["body"].replace("{portal_url}", url)}
+        for step in guide
+    ]
+
 
 @router.get("/")
 async def list_integrations():
@@ -185,15 +603,20 @@ async def list_integrations():
             "name":        intg["name"],
             "description": intg["description"],
             "icon":        intg["icon"],
+            "logo_url":    _get_logo_url(intg["id"]),
+            "category":    intg.get("category", ""),
+            "categories":  intg.get("categories", [intg.get("category", "")]),
             "docs_url":    intg["docs_url"],
-            "configured":  all(raw.get(f["key"], "").strip() for f in intg["fields"]),
+            "setup_guide": _inject_portal_url(intg.get("setup_guide", [])),
+            "configured":  all(raw.get(f["key"], "").strip() for f in intg["fields"] if not f.get("optional")),
+            "enabled":     _is_enabled(intg["id"]),
             "fields":      fields_out,
         })
     return result
 
 
 @router.put("/{integration_id}")
-async def update_integration(integration_id: str, body: IntegrationUpdate):
+async def update_integration(integration_id: str, body: IntegrationUpdate, _: UserRecord = Depends(require_admin)):
     if integration_id not in INTEGRATIONS:
         raise HTTPException(status_code=404, detail="Integration not found")
 
@@ -226,8 +649,55 @@ async def update_integration(integration_id: str, body: IntegrationUpdate):
     }
 
 
+@router.put("/{integration_id}/enabled")
+async def set_integration_enabled(
+    integration_id: str,
+    body: IntegrationEnabled,
+    _: UserRecord = Depends(require_admin),
+):
+    if integration_id not in INTEGRATIONS:
+        raise HTTPException(status_code=404, detail="Integration not found")
+    key = f"{integration_id.upper()}_ENABLED"
+    _write_env_keys({key: "true" if body.enabled else "false"})
+    return {"id": integration_id, "enabled": body.enabled}
+
+
+@router.post("/{integration_id}/upload-logo")
+async def upload_integration_logo(
+    integration_id: str,
+    file: UploadFile = File(...),
+    _: UserRecord = Depends(require_admin),
+):
+    if integration_id not in INTEGRATIONS:
+        raise HTTPException(status_code=404, detail="Integration not found")
+
+    ext = Path(file.filename or "").suffix.lower() or ".png"
+    if ext not in ALLOWED_LOGO_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type '{ext}'. Use PNG, JPG, WEBP, SVG, or GIF.",
+        )
+
+    content = await file.read()
+    if len(content) > 2 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Logo must be under 2 MB.")
+
+    # Remove any previous logo for this integration
+    for old in LOGOS_DIR.glob(f"{integration_id}.*"):
+        old.unlink(missing_ok=True)
+
+    dest = LOGOS_DIR / f"{integration_id}{ext}"
+    dest.write_bytes(content)
+
+    env_key = f"{integration_id.upper()}_LOGO_PATH"
+    _write_env_keys({env_key: str(dest)})
+
+    mtime = int(dest.stat().st_mtime)
+    return {"logo_url": f"/uploads/integration-logos/{integration_id}{ext}?t={mtime}"}
+
+
 @router.post("/{integration_id}/test")
-async def test_integration(integration_id: str):
+async def test_integration(integration_id: str, _: UserRecord = Depends(require_admin)):
     if integration_id not in INTEGRATIONS:
         raise HTTPException(status_code=404, detail="Integration not found")
 
@@ -246,8 +716,24 @@ async def test_integration(integration_id: str):
             return await _test_logitech_sync(raw)
         if integration_id == "intune":
             return await _test_intune(raw)
+        if integration_id == "ccure":
+            return await _test_ccure(raw)
+        if integration_id == "workday":
+            return await _test_workday(raw)
+        if integration_id == "papercut":
+            return await _test_papercut(raw)
         if integration_id == "ringcentral":
             return await _test_ringcentral(raw)
+        if integration_id == "ringcentral_embeddable":
+            return await _test_ringcentral_embeddable(raw)
+        if integration_id == "unifi":
+            return await _test_unifi(raw)
+        if integration_id == "okta":
+            return await _test_okta(raw)
+        if integration_id == "meraki":
+            return await _test_meraki(raw)
+        if integration_id == "fortinet":
+            return await _test_fortinet(raw)
     except Exception as e:
         return {"success": False, "message": str(e)}
 
@@ -505,6 +991,89 @@ async def _test_intune(raw: dict) -> dict:
     return {"success": True, "message": "Connected to Microsoft Intune successfully."}
 
 
+async def _test_ccure(raw: dict) -> dict:
+    server_url = raw.get("CCURE_SERVER_URL", "").strip().rstrip("/")
+    username   = raw.get("CCURE_USERNAME",   "").strip()
+    password   = raw.get("CCURE_PASSWORD",   "").strip()
+    if not all([server_url, username, password]):
+        return {"success": False, "message": "Missing credentials — save all fields first."}
+
+    try:
+        async with httpx.AsyncClient(timeout=15, verify=False) as c:
+            r = await c.post(
+                f"{server_url}/victorwebservice/api/Authenticate/GetToken",
+                json={"UserName": username, "Password": password, "ClientName": "ControlPoint"},
+            )
+        if r.status_code == 401:
+            return {"success": False, "message": "Invalid username or password."}
+        if r.status_code == 404:
+            return {"success": False, "message": "Victor Web Service not found — verify the server URL and that the service is running."}
+        if r.status_code >= 400:
+            return {"success": False, "message": f"API error {r.status_code}: {r.text[:200]}"}
+        return {"success": True, "message": "Connected to C•CURE 9000 successfully."}
+    except Exception as e:
+        return {"success": False, "message": f"Connection failed: {str(e)}"}
+
+
+async def _test_workday(raw: dict) -> dict:
+    tenant        = raw.get("WORKDAY_TENANT",        "").strip()
+    client_id     = raw.get("WORKDAY_CLIENT_ID",     "").strip()
+    client_secret = raw.get("WORKDAY_CLIENT_SECRET", "").strip()
+    if not all([tenant, client_id, client_secret]):
+        return {"success": False, "message": "Missing credentials — save all fields first."}
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.post(
+                f"https://wd2.myworkday.com/{tenant}/oauth2/v1/token",
+                data={
+                    "grant_type":    "client_credentials",
+                    "client_id":     client_id,
+                    "client_secret": client_secret,
+                },
+            )
+        if r.status_code == 401:
+            return {"success": False, "message": "Invalid credentials — check Client ID, Secret, and Tenant Name."}
+        if r.status_code == 404:
+            return {"success": False, "message": f"Tenant '{tenant}' not found — verify your tenant name."}
+        if r.status_code >= 400:
+            return {"success": False, "message": f"Auth error {r.status_code}: {r.text[:200]}"}
+        return {"success": True, "message": f"Connected to Workday tenant '{tenant}' successfully."}
+    except Exception as e:
+        return {"success": False, "message": f"Connection failed: {str(e)}"}
+
+
+async def _test_papercut(raw: dict) -> dict:
+    server_url = raw.get("PAPERCUT_SERVER_URL", "").strip().rstrip("/")
+    auth_token = raw.get("PAPERCUT_AUTH_TOKEN", "").strip()
+    if not all([server_url, auth_token]):
+        return {"success": False, "message": "Missing credentials — save all fields first."}
+
+    try:
+        # PaperCut internal servers commonly use self-signed certs
+        async with httpx.AsyncClient(timeout=15, verify=False) as c:
+            r = await c.get(
+                f"{server_url}/api/health",
+                headers={"Authorization": auth_token},
+            )
+        if r.status_code == 401:
+            return {"success": False, "message": "Invalid auth token."}
+        if r.status_code == 404:
+            # Older PaperCut versions may not have /api/health — try printers endpoint
+            async with httpx.AsyncClient(timeout=15, verify=False) as c:
+                r = await c.get(
+                    f"{server_url}/api/printers?limit=1",
+                    headers={"Authorization": auth_token},
+                )
+        if r.status_code == 401:
+            return {"success": False, "message": "Invalid auth token."}
+        if r.status_code >= 400:
+            return {"success": False, "message": f"API error {r.status_code}: {r.text[:200]}"}
+        return {"success": True, "message": "Connected to PaperCut successfully."}
+    except Exception as e:
+        return {"success": False, "message": f"Connection failed: {str(e)}"}
+
+
 async def _test_ringcentral(raw: dict) -> dict:
     client_id     = raw.get("RC_CLIENT_ID", "").strip()
     client_secret = raw.get("RC_CLIENT_SECRET", "").strip()
@@ -549,3 +1118,139 @@ async def _test_ringcentral(raw: dict) -> dict:
     acct = r2.json()
     name = acct.get("name", "") or acct.get("mainNumber", "account verified")
     return {"success": True, "message": f"Connected — {name}"}
+
+
+async def _test_ringcentral_embeddable(raw: dict) -> dict:
+    client_id     = raw.get("RC_WIDGET_CLIENT_ID", "").strip()
+    client_secret = raw.get("RC_WIDGET_CLIENT_SECRET", "").strip()
+    if not all([client_id, client_secret]):
+        return {"success": False, "message": "Missing credentials — save all fields first."}
+
+    server_url = (
+        raw.get("RC_WIDGET_SERVER_URL", "").strip()
+        or "https://platform.ringcentral.com"
+    ).rstrip("/")
+    credentials = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
+    try:
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.get(
+                f"{server_url}/restapi/v1.0/client-info",
+                headers={"Authorization": f"Basic {credentials}"},
+            )
+        if r.status_code == 200:
+            return {"success": True, "message": "Widget app credentials verified successfully."}
+        if r.status_code == 401:
+            return {"success": False, "message": "Invalid Widget Client ID or Secret."}
+        return {"success": True, "message": "Widget app configured — credentials accepted by RingCentral."}
+    except Exception as e:
+        return {"success": False, "message": f"Connection failed: {str(e)}"}
+
+
+async def _test_okta(raw: dict) -> dict:
+    domain    = raw.get("OKTA_DOMAIN", "").strip().rstrip("/").removeprefix("https://").removeprefix("http://")
+    api_token = raw.get("OKTA_API_TOKEN", "").strip()
+    if not all([domain, api_token]):
+        return {"success": False, "message": "Missing credentials — save Okta Domain and API Token first."}
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.get(
+                f"https://{domain}/api/v1/users",
+                headers={"Authorization": f"SSWS {api_token}", "Accept": "application/json"},
+                params={"limit": 1},
+            )
+        if r.status_code == 401:
+            return {"success": False, "message": "Invalid API token — check that the token is active and has read permissions."}
+        if r.status_code == 403:
+            return {"success": False, "message": "Token lacks permission to read users — assign at least Read-Only Admin or a Users read role."}
+        if r.status_code == 404:
+            return {"success": False, "message": f"Domain '{domain}' not found — verify your Okta domain."}
+        if r.status_code >= 400:
+            return {"success": False, "message": f"API error {r.status_code}: {r.text[:200]}"}
+
+        users = r.json()
+        count = len(users) if isinstance(users, list) else "?"
+        return {"success": True, "message": f"Connected to {domain} — directory accessible."}
+    except Exception as e:
+        return {"success": False, "message": f"Connection failed: {str(e)}"}
+
+
+async def _test_unifi(raw: dict) -> dict:
+    api_key = raw.get("UNIFI_API_KEY", "").strip()
+    if not api_key:
+        return {"success": False, "message": "Missing API key — save the field first."}
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.get(
+                "https://api.ui.com/v1/hosts",
+                headers={"X-API-KEY": api_key, "Accept": "application/json"},
+            )
+        if r.status_code == 401:
+            return {"success": False, "message": "Invalid API key."}
+        if r.status_code == 429:
+            return {"success": False, "message": "Rate limit exceeded — try again in a moment."}
+        if r.status_code >= 400:
+            return {"success": False, "message": f"API error {r.status_code}: {r.text[:200]}"}
+
+        hosts = r.json().get("data", [])
+        return {"success": True, "message": f"Connected — {len(hosts)} host(s) found across your account."}
+    except Exception as e:
+        return {"success": False, "message": f"Connection failed: {str(e)}"}
+
+
+async def _test_meraki(raw: dict) -> dict:
+    api_key = raw.get("MERAKI_API_KEY", "").strip()
+    if not api_key:
+        return {"success": False, "message": "Missing API key — save the field first."}
+
+    base_url = (raw.get("MERAKI_BASE_URL", "") or "https://api.meraki.com/api/v1").strip().rstrip("/")
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.get(
+                f"{base_url}/organizations",
+                headers={"X-Cisco-Meraki-API-Key": api_key, "Accept": "application/json"},
+            )
+        if r.status_code == 401:
+            return {"success": False, "message": "Invalid API key."}
+        if r.status_code == 429:
+            return {"success": False, "message": "Rate limit exceeded — try again in a moment."}
+        if r.status_code >= 400:
+            return {"success": False, "message": f"API error {r.status_code}: {r.text[:200]}"}
+
+        orgs = r.json()
+        count = len(orgs) if isinstance(orgs, list) else 0
+        return {"success": True, "message": f"Connected — {count} organization(s) accessible with this API key."}
+    except Exception as e:
+        return {"success": False, "message": f"Connection failed: {str(e)}"}
+
+
+async def _test_fortinet(raw: dict) -> dict:
+    host = raw.get("FORTINET_HOST", "").strip().rstrip("/")
+    api_key = raw.get("FORTINET_API_KEY", "").strip()
+    if not host or not api_key:
+        return {"success": False, "message": "Missing FortiManager host or API key — save all fields first."}
+
+    verify_ssl_raw = raw.get("FORTINET_VERIFY_SSL", "true").strip().lower()
+    verify_ssl = verify_ssl_raw not in ("false", "0", "no")
+
+    try:
+        async with httpx.AsyncClient(timeout=15, verify=verify_ssl) as c:
+            r = await c.get(
+                f"{host}/jsonrpc",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                content='{"id":1,"method":"get","params":[{"url":"/sys/status"}],"jsonrpc":"2.0"}',
+            )
+        if r.status_code == 401:
+            return {"success": False, "message": "Invalid API key."}
+        if r.status_code >= 400:
+            return {"success": False, "message": f"API error {r.status_code}: {r.text[:200]}"}
+
+        data = r.json()
+        result = data.get("result", [{}])
+        status_data = result[0].get("data", {}) if isinstance(result, list) else {}
+        version = status_data.get("Version", "unknown version")
+        return {"success": True, "message": f"Connected to FortiManager — {version}."}
+    except Exception as e:
+        return {"success": False, "message": f"Connection failed: {str(e)}"}

@@ -1,3 +1,4 @@
+import json
 import os
 import uuid
 from datetime import datetime, timezone
@@ -8,7 +9,7 @@ from sqlalchemy import select
 from dotenv import load_dotenv
 from pathlib import Path
 from ..database import get_db
-from ..models import UserRecord
+from ..models import UserRecord, Role, ALL_PERMISSIONS
 
 BRANDING_DIR = Path(__file__).parent.parent / "uploads" / "branding"
 BRANDING_DIR.mkdir(parents=True, exist_ok=True)
@@ -95,6 +96,17 @@ async def _upsert_user(db: AsyncSession, uid: str, first_name: str, last_name: s
     return record
 
 
+async def _get_user_permissions(record: UserRecord, db: AsyncSession) -> list[str]:
+    """Return the permission list for a user based on their role."""
+    if record.role == "admin":
+        return list(ALL_PERMISSIONS)
+    role_result = await db.execute(select(Role).where(Role.name == record.role))
+    role = role_result.scalar_one_or_none()
+    if not role:
+        return []
+    return json.loads(role.permissions or "[]")
+
+
 async def require_admin(request: Request, db: AsyncSession = Depends(get_db)):
     user = getattr(request.state, "user", None)
     if not user or not user.get("id"):
@@ -104,6 +116,25 @@ async def require_admin(request: Request, db: AsyncSession = Depends(get_db)):
     if not record or record.role != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
     return record
+
+
+def require_permission(perm: str):
+    """Dependency factory: raise 403 if the current user lacks the given permission."""
+    async def _check(request: Request, db: AsyncSession = Depends(get_db)):
+        user = getattr(request.state, "user", None)
+        if not user or not user.get("id"):
+            raise HTTPException(status_code=401, detail="Not authenticated")
+        result = await db.execute(select(UserRecord).where(UserRecord.id == user["id"]))
+        record = result.scalar_one_or_none()
+        if not record:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+        if record.role == "admin":
+            return record  # admin always passes
+        perms = await _get_user_permissions(record, db)
+        if perm not in perms:
+            raise HTTPException(status_code=403, detail="Permission denied")
+        return record
+    return _check
 
 
 @router.get("/me")
@@ -118,11 +149,13 @@ async def get_current_user(request: Request, db: AsyncSession = Depends(get_db))
         user.get("last_name", ""),
         user.get("email", ""),
     )
+    permissions = await _get_user_permissions(record, db)
     return {
         "id": record.id, "first_name": record.first_name, "last_name": record.last_name,
         "name": record.name, "email": record.email, "role": record.role,
         "rc_extension_id":    record.rc_extension_id or "",
         "rc_presence_access": bool(record.rc_presence_access),
+        "permissions":        permissions,
     }
 
 
@@ -353,9 +386,9 @@ async def update_user_role(
     db: AsyncSession = Depends(get_db),
 ):
     """Admin only: change a user's role."""
-    valid_roles = {"admin", "user", "service_desk", "applications_team", "net_inf_team"}
-    if body.role not in valid_roles:
-        raise HTTPException(status_code=400, detail=f"Role must be one of: {', '.join(sorted(valid_roles))}")
+    role_result = await db.execute(select(Role).where(Role.name == body.role))
+    if not role_result.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail=f"Role '{body.role}' does not exist")
     if user_id == admin.id:
         raise HTTPException(status_code=400, detail="Cannot change your own role")
     result = await db.execute(select(UserRecord).where(UserRecord.id == user_id))

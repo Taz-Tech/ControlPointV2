@@ -8,8 +8,8 @@ from contextlib import asynccontextmanager
 
 load_dotenv(dotenv_path=Path(__file__).parent / ".env", override=True)
 
-from .database import create_all
-from .routers import users, switches, maps, freshservice, mailboxes, settings, immybot, shortcuts, bookmarks, sites, integrations, devices, logitech_sync, intune, conference_rooms, room_configs, ringcentral, zones
+from .database import create_all, seed_roles
+from .routers import users, switches, maps, freshservice, mailboxes, settings, immybot, shortcuts, bookmarks, sites, integrations, devices, logitech_sync, intune, conference_rooms, room_configs, ringcentral, zones, roles as roles_router, unifi, directory, sso
 from .jwt_middleware import AzureJWTMiddleware
 
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
@@ -24,6 +24,7 @@ ALLOWED_ORIGINS = os.getenv(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await create_all()
+    await seed_roles()
     # Pre-warm the ImmyBot filter cache from SQLite so devices that are invisible
     # to unfiltered pagination (e.g. onboardingStatus=2) are available immediately
     # on the first request rather than waiting for background probes to find them.
@@ -71,6 +72,10 @@ app.include_router(conference_rooms.router)
 app.include_router(room_configs.router)
 app.include_router(ringcentral.router)
 app.include_router(zones.router)
+app.include_router(roles_router.router)
+app.include_router(unifi.router)
+app.include_router(directory.router)
+app.include_router(sso.router)
 
 
 @app.get("/api/health")
