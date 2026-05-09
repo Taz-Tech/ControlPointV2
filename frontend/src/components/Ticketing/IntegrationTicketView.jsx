@@ -465,4 +465,4 @@ export default function IntegrationTicketView({ provider }) {
   )
 }
 
-export { SetupPrompt }
+export { SetupPrompt, CreateTicketModal }

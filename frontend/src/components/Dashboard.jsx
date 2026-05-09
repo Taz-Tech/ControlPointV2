@@ -6,6 +6,7 @@ import {
   getShortcuts, getBookmarks, createBookmark, deleteBookmark,
 } from '../api/client.js'
 import { UserContext } from '../App.jsx'
+import { CreateTicketModal as IntegrationCreateModal } from './Ticketing/IntegrationTicketView.jsx'
 
 const RECENT_LOOKUPS_KEY = 'it_portal_recent_lookups'
 const MAX_RECENT = 6
@@ -611,9 +612,11 @@ export default function Dashboard({ navigateTo }) {
   const { role } = useContext(UserContext)
   const showAlerts = ALERTS_ROLES.has(role)
 
+  const [ticketMode,  setTicketMode]  = useState(null)
   const [fsStats,  setFsStats]  = useState(null)
   const [fsErr,    setFsErr]    = useState(false)
   const [fsLoad,   setFsLoad]   = useState(true)
+  const [showNewTicket, setShowNewTicket] = useState(false)
 
   const [imStats,  setImStats]  = useState(null)
   const [imErr,    setImErr]    = useState(false)
@@ -640,6 +643,10 @@ export default function Dashboard({ navigateTo }) {
 
 
   useEffect(() => {
+    api.get('/api/ticket-integration/mode')
+      .then(r => setTicketMode(r.data))
+      .catch(() => setTicketMode({ mode: 'none', native: false, configured: false }))
+
     getFreshserviceStats()
       .then(r => setFsStats(r.data))
       .catch(() => setFsErr(true))
@@ -697,34 +704,44 @@ export default function Dashboard({ navigateTo }) {
 
       {/* ── Stats row ── */}
       <div className="dash-stats-grid">
-        <StatCard
-          icon="🎫" label="My Open Tickets"   color="var(--cyan)"
-          value={fsStats?.open}  sub="assigned to me"
-          loading={fsLoad} error={fsErr}
-          onClick={!fsLoad && !fsErr ? () => setShowTickets(true) : undefined}
-        />
-        <StatCard
-          icon="⏳" label="Unassigned Tickets" color="var(--yellow)"
-          value={fsStats?.pending} sub="no agent assigned"
-          loading={fsLoad} error={fsErr}
-          onClick={!fsLoad && !fsErr ? () => setShowUnassigned(true) : undefined}
-        />
-        {showAlerts && (
+        {ticketMode?.mode !== 'none' && (<>
           <StatCard
-            icon="🔔" label="Alerts" color="var(--orange, #f97316)"
-            value={probLoad ? undefined : problems.length} sub="open · not resolved"
-            loading={probLoad} error={probErr}
-            onClick={!probLoad && !probErr ? () => setShowProblems(true) : undefined}
+            icon="🎫" label="My Open Tickets"   color="var(--cyan)"
+            value={fsStats?.open}  sub="assigned to me"
+            loading={fsLoad} error={fsErr}
+            onClick={!fsLoad && !fsErr ? () => setShowTickets(true) : undefined}
           />
-        )}
-        {showAlerts && (
           <StatCard
-            icon="🔴" label="Open Problems" color="var(--red)"
-            value={fsProbLoad ? undefined : fsProblems.length} sub="open · not closed"
-            loading={fsProbLoad} error={fsProbErr}
-            onClick={!fsProbLoad && !fsProbErr ? () => setShowFsProblems(true) : undefined}
+            icon="⏳" label="Unassigned Tickets" color="var(--yellow)"
+            value={fsStats?.pending} sub="no agent assigned"
+            loading={fsLoad} error={fsErr}
+            onClick={!fsLoad && !fsErr ? () => setShowUnassigned(true) : undefined}
           />
-        )}
+          {showAlerts && (
+            <StatCard
+              icon="🔔" label="Alerts" color="var(--orange, #f97316)"
+              value={probLoad ? undefined : problems.length} sub="open · not resolved"
+              loading={probLoad} error={probErr}
+              onClick={!probLoad && !probErr ? () => setShowProblems(true) : undefined}
+            />
+          )}
+          {showAlerts && (
+            <StatCard
+              icon="🔴" label="Open Problems" color="var(--red)"
+              value={fsProbLoad ? undefined : fsProblems.length} sub="open · not closed"
+              loading={fsProbLoad} error={fsProbErr}
+              onClick={!fsProbLoad && !fsProbErr ? () => setShowFsProblems(true) : undefined}
+            />
+          )}
+          {ticketMode?.mode === 'integration' && (
+            <StatCard
+              icon="➕" label="New Ticket" color="var(--green)"
+              value={null} sub={ticketMode?.provider || 'external'}
+              loading={false} error={false}
+              onClick={() => setShowNewTicket(true)}
+            />
+          )}
+        </>)}
         <StatCard
           icon="💻" label="Total Devices"  color="var(--purple)"
           value={imStats?.total} sub={imStats ? `${imStats.online} online` : null}
@@ -858,6 +875,13 @@ export default function Dashboard({ navigateTo }) {
       )}
       {showFsProblems && (
         <ProblemsDrawer fsProblems={fsProblems} onClose={() => setShowFsProblems(false)} />
+      )}
+      {showNewTicket && ticketMode?.provider && (
+        <IntegrationCreateModal
+          provider={ticketMode.provider}
+          onClose={() => setShowNewTicket(false)}
+          onCreated={() => { setShowNewTicket(false); setFsLoad(true); getFreshserviceStats().then(r => setFsStats(r.data)).catch(() => setFsErr(true)).finally(() => setFsLoad(false)) }}
+        />
       )}
     </div>
   )
