@@ -65,6 +65,8 @@ async def get_feature(key: str, db: AsyncSession = Depends(get_db)):
     return _serialize(row)
 
 
+_TICKETING_MUTEX = {"native_ticketing", "external_ticketing"}
+
 @router.patch("/{key}")
 async def update_feature(
     key: str,
@@ -72,14 +74,30 @@ async def update_feature(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
-    """Toggle a feature on/off and/or update its config. Admin only."""
+    """Toggle a feature on/off and/or update its config. Admin only.
+
+    native_ticketing and external_ticketing are mutually exclusive —
+    enabling one automatically disables the other.
+    """
     actor = _require_admin(request)
     row = (await db.execute(select(Feature).where(Feature.key == key))).scalar_one_or_none()
     if not row:
         raise HTTPException(404, f"Feature '{key}' not found")
 
+    enabling = body.get("enabled", None)
+
     if "enabled" in body:
-        row.enabled = bool(body["enabled"])
+        row.enabled = bool(enabling)
+
+        # Mutual exclusivity: enabling one ticketing mode disables the other
+        if enabling and key in _TICKETING_MUTEX:
+            other_key = (_TICKETING_MUTEX - {key}).pop()
+            other = (await db.execute(select(Feature).where(Feature.key == other_key))).scalar_one_or_none()
+            if other and other.enabled:
+                other.enabled   = False
+                other.updated_at = _now()
+                other.updated_by = actor.get("email") or actor.get("preferred_username") or "admin"
+
     if "config" in body:
         try:
             existing = json.loads(row.config) if row.config else {}
