@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 load_dotenv(dotenv_path=Path(__file__).parent / ".env", override=True)
 
 from .database import create_all, seed_roles, seed_notification_rules
-from .routers import users, switches, maps, freshservice, mailboxes, settings, immybot, shortcuts, bookmarks, sites, integrations, devices, logitech_sync, intune, conference_rooms, room_configs, ringcentral, zones, roles as roles_router, unifi, directory, sso, ticketing, kb, portal, auth_local, procurement, assets as assets_router, notifications as notifications_router, events as events_router, audit as audit_router
+from .routers import users, switches, maps, freshservice, mailboxes, settings, immybot, shortcuts, bookmarks, sites, integrations, devices, logitech_sync, intune, conference_rooms, room_configs, ringcentral, zones, roles as roles_router, unifi, directory, sso, ticketing, kb, portal, auth_local, procurement, assets as assets_router, notifications as notifications_router, events as events_router, audit as audit_router, ticket_integration as ticket_integration_router
 from .jwt_middleware import AzureJWTMiddleware
 
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
@@ -87,6 +87,7 @@ app.include_router(assets_router.router)
 app.include_router(notifications_router.router)
 app.include_router(events_router.router)
 app.include_router(audit_router.router)
+app.include_router(ticket_integration_router.router)
 
 
 @app.get("/api/health")
