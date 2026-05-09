@@ -30,20 +30,12 @@ ALLOWED_LOGO_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".svg", ".gif"}
 
 
 def _get_logo_url(integration_id: str) -> str | None:
-    key = f"{integration_id.upper()}_LOGO_PATH"
-    path_str = os.environ.get(key, "") or _read_env_raw().get(key, "")
-    path_str = path_str.strip()
-    if not path_str:
-        return None
-    p = Path(path_str)
-    if not p.is_file():
-        return None
-    try:
-        rel = p.relative_to(Path(__file__).parent.parent / "uploads")
-        mtime = int(p.stat().st_mtime)
-        return f"/uploads/{rel.as_posix()}?t={mtime}"
-    except ValueError:
-        return None
+    for ext in (".png", ".svg", ".jpg", ".jpeg", ".webp", ".gif"):
+        p = LOGOS_DIR / f"{integration_id}{ext}"
+        if p.is_file():
+            mtime = int(p.stat().st_mtime)
+            return f"/uploads/integration-logos/{integration_id}{ext}?t={mtime}"
+    return None
 
 # ── Integration definitions ───────────────────────────────────────────────────
 
