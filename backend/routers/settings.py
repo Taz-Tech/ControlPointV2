@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import uuid
@@ -38,6 +39,8 @@ def _write_env_key(key: str, value: str):
 
 load_dotenv(dotenv_path=Path(__file__).parent.parent / ".env", override=True)
 
+from ..audit_log import log_audit
+
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
 ADMIN_EMAILS = {
@@ -74,12 +77,22 @@ async def _upsert_user(db: AsyncSession, uid: str, first_name: str, last_name: s
             await db.flush()
             record = UserRecord(id=uid, first_name=first_name, last_name=last_name, email=email, role=saved_role, last_seen=now)
             db.add(record)
+            await db.flush()
+            await log_audit(db, actor=record, action="user.first_login",
+                            category="auth", target_type="user", target_id=uid,
+                            target_label=email,
+                            detail=f"{email} signed in for the first time (accepted invite, role: {saved_role})")
         elif REQUIRE_PREREGISTRATION and not _is_admin_email(email):
             raise HTTPException(status_code=403, detail="Access not granted. Ask an admin to invite you.")
         else:
             role = "admin" if _is_admin_email(email) else "user"
             record = UserRecord(id=uid, first_name=first_name, last_name=last_name, email=email, role=role, last_seen=now)
             db.add(record)
+            await db.flush()
+            await log_audit(db, actor=record, action="user.first_login",
+                            category="auth", target_type="user", target_id=uid,
+                            target_label=email,
+                            detail=f"{email} signed in for the first time (role: {role})")
     else:
         record.email     = email
         record.last_seen = now
@@ -89,7 +102,14 @@ async def _upsert_user(db: AsyncSession, uid: str, first_name: str, last_name: s
         if not record.last_name and last_name:
             record.last_name = last_name
         if _is_admin_email(email) and record.role != "admin":
+            old_role = record.role
             record.role = "admin"
+            await db.flush()
+            await log_audit(db, actor=record, action="user.role_changed",
+                            category="user_management", target_type="user", target_id=uid,
+                            target_label=email,
+                            detail=f"Auto-promoted to admin (email in ADMIN_EMAILS)",
+                            extra={"old_role": old_role, "new_role": "admin"})
 
     await db.commit()
     await db.refresh(record)
@@ -142,7 +162,23 @@ async def get_current_user(request: Request, db: AsyncSession = Depends(get_db))
     """Upsert the current user and return their profile + role."""
     user = getattr(request.state, "user", None)
     if not user or not user.get("id"):
-        return {"id": None, "first_name": "", "last_name": "", "email": None, "role": "user"}
+        return {"id": None, "first_name": "", "last_name": "", "email": None, "role": "user", "user_type": "staff"}
+
+    # Portal/customer users have a customer_id — don't upsert into staff records
+    if user.get("customer_id"):
+        return {
+            "id":               user["id"],
+            "first_name":       user.get("first_name", ""),
+            "last_name":        user.get("last_name", ""),
+            "email":            user.get("email", ""),
+            "role":             "portal_user",
+            "user_type":        "portal",
+            "customer_id":      user["customer_id"],
+            "permissions":      [],
+            "rc_extension_id":  "",
+            "rc_presence_access": False,
+        }
+
     record = await _upsert_user(
         db, user["id"],
         user.get("first_name", ""),
@@ -153,6 +189,7 @@ async def get_current_user(request: Request, db: AsyncSession = Depends(get_db))
     return {
         "id": record.id, "first_name": record.first_name, "last_name": record.last_name,
         "name": record.name, "email": record.email, "role": record.role,
+        "user_type":          "staff",
         "rc_extension_id":    record.rc_extension_id or "",
         "rc_presence_access": bool(record.rc_presence_access),
         "permissions":        permissions,
@@ -172,14 +209,14 @@ async def get_branding():
 @router.post("/logo")
 async def upload_logo(
     file: UploadFile = File(...),
-    _: UserRecord = Depends(require_admin),
+    admin: UserRecord = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
 ):
     ext = Path(file.filename or "").suffix.lower() or ".png"
     allowed = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp"}
     if ext not in allowed:
         raise HTTPException(status_code=400, detail="Unsupported image type")
 
-    # Remove old logo files
     for old in BRANDING_DIR.glob("logo.*"):
         old.unlink(missing_ok=True)
 
@@ -189,21 +226,30 @@ async def upload_logo(
 
     url = f"/uploads/branding/{filename}"
     _write_env_key("COMPANY_LOGO_URL", url)
+    await log_audit(db, actor=admin, action="branding.logo_uploaded",
+                    category="system_settings", target_type="branding", target_label="Company Logo",
+                    detail=f"Logo updated: {file.filename}")
+    await db.commit()
     return {"logoUrl": url}
 
 
 @router.delete("/logo")
-async def delete_logo(_: UserRecord = Depends(require_admin)):
+async def delete_logo(admin: UserRecord = Depends(require_admin), db: AsyncSession = Depends(get_db)):
     for old in BRANDING_DIR.glob("logo.*"):
         old.unlink(missing_ok=True)
     _write_env_key("COMPANY_LOGO_URL", "")
+    await log_audit(db, actor=admin, action="branding.logo_deleted",
+                    category="system_settings", target_type="branding", target_label="Company Logo",
+                    detail="Logo removed")
+    await db.commit()
     return {"ok": True}
 
 
 @router.post("/favicon")
 async def upload_favicon(
     file: UploadFile = File(...),
-    _: UserRecord = Depends(require_admin),
+    admin: UserRecord = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
 ):
     ext = Path(file.filename or "").suffix.lower() or ".png"
     allowed = {".png", ".jpg", ".jpeg", ".ico", ".svg", ".gif", ".webp"}
@@ -219,21 +265,30 @@ async def upload_favicon(
 
     url = f"/uploads/branding/{filename}"
     _write_env_key("COMPANY_FAVICON_URL", url)
+    await log_audit(db, actor=admin, action="branding.favicon_uploaded",
+                    category="system_settings", target_type="branding", target_label="Favicon",
+                    detail=f"Favicon updated: {file.filename}")
+    await db.commit()
     return {"faviconUrl": url}
 
 
 @router.delete("/favicon")
-async def delete_favicon(_: UserRecord = Depends(require_admin)):
+async def delete_favicon(admin: UserRecord = Depends(require_admin), db: AsyncSession = Depends(get_db)):
     for old in BRANDING_DIR.glob("favicon.*"):
         old.unlink(missing_ok=True)
     _write_env_key("COMPANY_FAVICON_URL", "")
+    await log_audit(db, actor=admin, action="branding.favicon_deleted",
+                    category="system_settings", target_type="branding", target_label="Favicon",
+                    detail="Favicon removed")
+    await db.commit()
     return {"ok": True}
 
 
 @router.post("/icon")
 async def upload_icon(
     file: UploadFile = File(...),
-    _: UserRecord = Depends(require_admin),
+    admin: UserRecord = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
 ):
     ext = Path(file.filename or "").suffix.lower() or ".png"
     allowed = {".png", ".jpg", ".jpeg", ".svg", ".webp", ".gif"}
@@ -249,14 +304,22 @@ async def upload_icon(
 
     url = f"/uploads/branding/{filename}"
     _write_env_key("COMPANY_ICON_URL", url)
+    await log_audit(db, actor=admin, action="branding.icon_uploaded",
+                    category="system_settings", target_type="branding", target_label="Header Icon",
+                    detail=f"Header icon updated: {file.filename}")
+    await db.commit()
     return {"iconUrl": url}
 
 
 @router.delete("/icon")
-async def delete_icon(_: UserRecord = Depends(require_admin)):
+async def delete_icon(admin: UserRecord = Depends(require_admin), db: AsyncSession = Depends(get_db)):
     for old in BRANDING_DIR.glob("icon.*"):
         old.unlink(missing_ok=True)
     _write_env_key("COMPANY_ICON_URL", "")
+    await log_audit(db, actor=admin, action="branding.icon_deleted",
+                    category="system_settings", target_type="branding", target_label="Header Icon",
+                    detail="Header icon removed")
+    await db.commit()
     return {"ok": True}
 
 
@@ -312,7 +375,7 @@ async def list_users(_: UserRecord = Depends(require_admin), db: AsyncSession = 
 @router.post("/users")
 async def invite_user(
     body: UserInvite,
-    _: UserRecord = Depends(require_admin),
+    admin: UserRecord = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
     """Admin only: pre-register a user by email so they can sign in."""
@@ -329,6 +392,11 @@ async def invite_user(
         email=email, role=role, last_seen=None,
     )
     db.add(record)
+    await db.flush()
+    await log_audit(db, actor=admin, action="user.invited",
+                    category="user_management", target_type="user", target_label=email,
+                    detail=f"{admin.email} invited {email} (role: {role})",
+                    extra={"invited_email": email, "role": role})
     await db.commit()
     await db.refresh(record)
     return {
@@ -350,7 +418,16 @@ async def delete_user(
     record = result.scalar_one_or_none()
     if not record:
         raise HTTPException(status_code=404, detail="User not found")
+    was_invite = record.id.startswith(INVITE_PREFIX)
+    label = record.email
+    role  = record.role
     await db.delete(record)
+    await db.flush()
+    await log_audit(db, actor=admin, action="user.invite_rescinded" if was_invite else "user.deleted",
+                    category="user_management", target_type="user", target_id=user_id,
+                    target_label=label,
+                    detail=f"{admin.email} {'rescinded invite for' if was_invite else 'deleted user'} {label} (role: {role})",
+                    extra={"deleted_email": label, "role": role, "was_invite": was_invite})
     await db.commit()
     return {"ok": True}
 
@@ -359,7 +436,7 @@ async def delete_user(
 async def update_user_profile(
     user_id: str,
     body: ProfileUpdate,
-    _: UserRecord = Depends(require_admin),
+    admin: UserRecord = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
     """Admin only: update a user's name."""
@@ -367,9 +444,25 @@ async def update_user_profile(
     record = result.scalar_one_or_none()
     if not record:
         raise HTTPException(status_code=404, detail="User not found")
+    changes = {}
+    old_name = f"{record.first_name or ''} {record.last_name or ''}".strip()
+    new_name = f"{body.first_name.strip()} {body.last_name.strip()}".strip()
+    if old_name != new_name:
+        changes["name"] = {"from": old_name, "to": new_name}
+    old_ext = record.rc_extension_id or ""
+    new_ext = (body.rc_extension_id or "").strip()
+    if old_ext != new_ext:
+        changes["rc_extension_id"] = {"from": old_ext, "to": new_ext}
     record.first_name      = body.first_name.strip()
     record.last_name       = body.last_name.strip()
-    record.rc_extension_id = (body.rc_extension_id or "").strip() or None
+    record.rc_extension_id = new_ext or None
+    if changes:
+        await log_audit(db, actor=admin, action="user.profile_updated",
+                        category="user_management", target_type="user", target_id=user_id,
+                        target_label=record.email,
+                        detail=f"{admin.email} updated profile for {record.email}: " +
+                               ", ".join(f"{k} → {v['to']}" for k, v in changes.items()),
+                        extra={"changes": changes})
     await db.commit()
     return {
         "id": record.id, "first_name": record.first_name, "last_name": record.last_name,
@@ -395,7 +488,13 @@ async def update_user_role(
     record = result.scalar_one_or_none()
     if not record:
         raise HTTPException(status_code=404, detail="User not found")
+    old_role = record.role
     record.role = body.role
+    await log_audit(db, actor=admin, action="user.role_changed",
+                    category="user_management", target_type="user", target_id=user_id,
+                    target_label=record.email,
+                    detail=f"{admin.email} changed role for {record.email}: {old_role} → {body.role}",
+                    extra={"old_role": old_role, "new_role": body.role})
     await db.commit()
     return {"id": record.id, "name": record.name, "email": record.email, "role": record.role}
 
@@ -404,11 +503,38 @@ class RCAccessUpdate(BaseModel):
     enabled: bool
 
 
+class AdminPasswordIn(BaseModel):
+    password: str
+
+
+@router.put("/users/{user_id}/password")
+async def admin_set_user_password(
+    user_id: str,
+    body: AdminPasswordIn,
+    admin: UserRecord = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Admin only: set (or clear) a staff user's local password."""
+    result = await db.execute(select(UserRecord).where(UserRecord.id == user_id))
+    record = result.scalar_one_or_none()
+    if not record:
+        raise HTTPException(status_code=404, detail="User not found")
+    if len(body.password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+    record.password_hash = hashlib.sha256(body.password.encode()).hexdigest()
+    await log_audit(db, actor=admin, action="user.password_set",
+                    category="user_management", target_type="user", target_id=user_id,
+                    target_label=record.email,
+                    detail=f"{admin.email} set local password for {record.email}")
+    await db.commit()
+    return {"ok": True}
+
+
 @router.put("/users/{user_id}/rc-access")
 async def update_user_rc_access(
     user_id: str,
     body: RCAccessUpdate,
-    _: UserRecord = Depends(require_admin),
+    admin: UserRecord = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
     """Admin only: grant or revoke RC Presence page access for a user."""
@@ -417,6 +543,10 @@ async def update_user_rc_access(
     if not record:
         raise HTTPException(status_code=404, detail="User not found")
     record.rc_presence_access = body.enabled
+    await log_audit(db, actor=admin, action="user.rc_access_changed",
+                    category="user_management", target_type="user", target_id=user_id,
+                    target_label=record.email,
+                    detail=f"{admin.email} {'granted' if body.enabled else 'revoked'} RC Presence access for {record.email}")
     await db.commit()
     return {
         "id": record.id, "name": record.name, "email": record.email,

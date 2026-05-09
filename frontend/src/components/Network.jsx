@@ -1,5 +1,6 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useContext } from 'react'
 import { getSites, syncUnifiDevices, getDevicePorts, getDeviceClients } from '../api/client.js'
+import { ClientContext } from '../ClientContext.js'
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -578,6 +579,7 @@ function SiteCard({ site, onSelect, onSync, syncing }) {
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 export default function Network() {
+  const { selectedClient } = useContext(ClientContext)
   const [view,         setView]         = useState('list')
   const [selectedSite, setSelectedSite] = useState(null)
   const [sites,        setSites]        = useState([])
@@ -586,10 +588,11 @@ export default function Network() {
   const [syncingAll,   setSyncingAll]   = useState(false)
 
   const loadSites = useCallback(async () => {
-    const r = await getSites()
+    const r = await getSites(selectedClient?.id ?? null)
     setSites(r.data)
+    setSelectedSite(null)
     return r.data
-  }, [])
+  }, [selectedClient])
 
   useEffect(() => { loadSites().finally(() => setLoading(false)) }, [loadSites])
 

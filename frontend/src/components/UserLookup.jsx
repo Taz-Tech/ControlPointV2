@@ -547,7 +547,7 @@ function UserDetailCard({ user }) {
 
 /* ── Main component ──────────────────────────────────────────────────────── */
 
-export default function UserLookup({ initialUser = null }) {
+export default function UserLookup({ initialUser = null, activeDetailId = null, onNavigateDetail }) {
   const [query, setQuery]         = useState('')
   const [results, setResults]     = useState([])
   const [loading, setLoading]     = useState(false)
@@ -570,7 +570,8 @@ export default function UserLookup({ initialUser = null }) {
   }, [])
 
   useEffect(() => {
-    if (initialUser) handleSelectUser(initialUser)
+    const toLoad = initialUser || (activeDetailId ? { id: activeDetailId } : null)
+    if (toLoad) handleSelectUser(toLoad)
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleSearch = useCallback((val) => {
@@ -594,6 +595,7 @@ export default function UserLookup({ initialUser = null }) {
 
   const handleSelectUser = async (user) => {
     setSelected(user.id)
+    onNavigateDetail?.(user.id)
     setResults([])        // hide other results once a user is chosen
     setDetail(null)
     setDetailLoading(true)

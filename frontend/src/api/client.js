@@ -8,9 +8,14 @@ export const api = axios.create({
   timeout: 30000,
 })
 
-// Attach Bearer token to every request (Azure AD via MSAL, or portal JWT for Okta SSO)
+// Attach Bearer token to every request (Azure AD via MSAL, or portal JWT)
 api.interceptors.request.use(async (config) => {
-  if (!msalInstance) return config
+  if (!msalInstance) {
+    // Azure disabled — attach portal JWT (email/password or Google SSO)
+    const portalToken = sessionStorage.getItem('portal_token')
+    if (portalToken) config.headers['Authorization'] = `Bearer ${portalToken}`
+    return config
+  }
   const accounts = msalInstance.getAllAccounts()
   if (accounts.length > 0) {
     try {
@@ -21,17 +26,12 @@ api.interceptors.request.use(async (config) => {
       config.headers['Authorization'] = `Bearer ${result.accessToken}`
     } catch (err) {
       if (err instanceof InteractionRequiredAuthError) {
-        // Session expired and can't be refreshed silently — force re-login
         msalInstance.loginRedirect(loginRequest)
       }
-      // For other transient errors, let the request proceed (backend returns 401)
     }
   } else {
-    // No MSAL account — attach portal JWT if present (Okta SSO users)
     const portalToken = sessionStorage.getItem('portal_token')
-    if (portalToken) {
-      config.headers['Authorization'] = `Bearer ${portalToken}`
-    }
+    if (portalToken) config.headers['Authorization'] = `Bearer ${portalToken}`
   }
   return config
 })
@@ -71,12 +71,14 @@ export const deleteSwitch  = (id)      => api.delete(`/api/switches/${id}`)
 export const resetPort     = (body)    => api.post('/api/switches/reset-port', body)
 
 // ── Users / Roles ─────────────────────────────────────────────────────────────
-export const getPortalUsers    = ()                        => api.get('/api/settings/users')
+export const getPortalUsers         = ()  => api.get('/api/settings/users')
+export const getAllClientPortalUsers = ()  => api.get('/api/tickets/portal-users/all')
 export const inviteUser        = (email)                   => api.post('/api/settings/users', { email })
 export const deletePortalUser  = (id)                      => api.delete(`/api/settings/users/${id}`)
 export const updateUserRole    = (id, role)                => api.put(`/api/settings/users/${id}/role`, { role })
 export const updateUserProfile   = (id, data)    => api.put(`/api/settings/users/${id}/profile`, data)
 export const updateUserRCAccess  = (id, enabled) => api.put(`/api/settings/users/${id}/rc-access`, { enabled })
+export const adminSetUserPassword = (id, password) => api.put(`/api/settings/users/${id}/password`, { password })
 
 // ── Dashboard stats ───────────────────────────────────────────────────────────
 export const getFreshserviceStats    = ()    => api.get('/api/freshservice/stats')
@@ -136,6 +138,14 @@ export const getIntegrations          = ()              => api.get('/api/integra
 export const updateIntegration        = (id, values)    => api.put(`/api/integrations/${id}`, { values })
 export const toggleIntegration        = (id, disable)   => api.put(`/api/integrations/${id}/enabled`, { enabled: !disable })
 export const testIntegration          = (id)            => api.post(`/api/integrations/${id}/test`)
+
+// ── Client Integrations ───────────────────────────────────────────────────────
+export const getClientIntegrations    = (customerId)    => api.get('/api/integrations/clients/', { params: customerId ? { customer_id: customerId } : {} })
+export const createClientIntegration  = (body)          => api.post('/api/integrations/clients/', body)
+export const updateClientIntegration  = (id, body)      => api.put(`/api/integrations/clients/${id}`, body)
+export const deleteClientIntegration  = (id)            => api.delete(`/api/integrations/clients/${id}`)
+export const toggleClientIntegration  = (id, enabled)   => api.post(`/api/integrations/clients/${id}/toggle`, { enabled })
+export const testClientIntegration    = (id)            => api.post(`/api/integrations/clients/${id}/test`)
 export const uploadIntegrationFile    = (uploadUrl, file) => {
   const fd = new FormData()
   fd.append('file', file)
@@ -148,9 +158,10 @@ export const uploadIntegrationLogo    = (id, file) => {
 }
 
 // ── Sites ─────────────────────────────────────────────────────────────────────
-export const getSites             = ()                    => api.get('/api/sites/')
-export const createSite           = (name)                => api.post('/api/sites/', { name })
+export const getSites             = (customerId)          => api.get('/api/sites/', { params: customerId ? { customer_id: customerId } : {} })
+export const createSite           = (name, customerId)    => api.post('/api/sites/', { name, customer_id: customerId || null })
 export const deleteSite           = (id)                  => api.delete(`/api/sites/${id}`)
+export const setSiteCustomer      = (siteId, customerId)  => api.patch(`/api/sites/${siteId}/customer`, { customer_id: customerId || null })
 export const addSwitchToSite      = (siteId, switchId)    => api.post(`/api/sites/${siteId}/switches/${switchId}`)
 export const removeSwitchFromSite = (siteId, switchId)    => api.delete(`/api/sites/${siteId}/switches/${switchId}`)
 export const addMapToSite         = (siteId, mapId)       => api.post(`/api/sites/${siteId}/maps/${mapId}`)
@@ -198,9 +209,48 @@ export const updateSeat    = (mapId, seatId, body) => api.put(`/api/maps/${mapId
 export const deleteSeat    = (mapId, seatId)       => api.delete(`/api/maps/${mapId}/seats/${seatId}`)
 export const importSeats   = (mapId, rows)         => api.post(`/api/maps/${mapId}/seats/import`, rows, { timeout: 120000 })
 
+// ── Assets ────────────────────────────────────────────────────────────────────
+export const getAssetStats          = ()          => api.get('/api/assets/stats')
+export const listAssets             = (params)    => api.get('/api/assets/', { params })
+export const listIntegrationDevices = (params)    => api.get('/api/assets/integration', { params })
+export const getAsset               = (id)        => api.get(`/api/assets/${id}`)
+export const createAsset            = (body)      => api.post('/api/assets/', body)
+export const updateAsset            = (id, body)  => api.put(`/api/assets/${id}`, body)
+export const deleteAsset            = (id)        => api.delete(`/api/assets/${id}`)
+export const getAssetCustomers      = ()          => api.get('/api/assets/customers')
+
 // ── Roles ─────────────────────────────────────────────────────────────────────
 export const getRoles          = ()            => api.get('/api/roles/')
 export const getPermissions    = ()            => api.get('/api/roles/permissions')
 export const createRole        = (body)        => api.post('/api/roles/', body)
 export const updateRole        = (name, body)  => api.put(`/api/roles/${name}`, body)
 export const deleteRole        = (name)        => api.delete(`/api/roles/${name}`)
+
+// ── Notifications ─────────────────────────────────────────────────────────────
+export const getNotifications       = (params) => api.get('/api/notifications', { params })
+export const getNotificationCount   = ()        => api.get('/api/notifications/count')
+export const markNotificationRead   = (id)      => api.patch(`/api/notifications/${id}/read`)
+export const markAllNotificationsRead = ()      => api.post('/api/notifications/read-all')
+export const deleteNotification     = (id)      => api.delete(`/api/notifications/${id}`)
+export const clearAllNotifications  = ()        => api.delete('/api/notifications')
+export const getNotificationRules   = ()        => api.get('/api/notifications/rules')
+export const createNotificationRule = (body)    => api.post('/api/notifications/rules', body)
+export const updateNotificationRule = (id, body) => api.patch(`/api/notifications/rules/${id}`, body)
+export const deleteNotificationRule = (id)      => api.delete(`/api/notifications/rules/${id}`)
+export const getRuleOverrides       = (ruleId)  => api.get(`/api/notifications/rules/${ruleId}/overrides`)
+export const setRuleOverride        = (ruleId, customerId, body) => api.put(`/api/notifications/rules/${ruleId}/overrides/${customerId}`, body)
+export const deleteRuleOverride     = (ruleId, customerId) => api.delete(`/api/notifications/rules/${ruleId}/overrides/${customerId}`)
+export const getNotificationGroups  = ()        => api.get('/api/notifications/groups')
+export const getGroupMembers        = (groupId) => api.get(`/api/notifications/groups/${groupId}/members`)
+export const addGroupMember         = (groupId, userId) => api.post(`/api/notifications/groups/${groupId}/members/${userId}`)
+export const removeGroupMember      = (groupId, userId) => api.delete(`/api/notifications/groups/${groupId}/members/${userId}`)
+
+// ── Ticket KB links ───────────────────────────────────────────────────────────
+export const getTicketKB      = (ticketId)              => api.get(`/api/tickets/${ticketId}/kb`)
+export const linkTicketKB     = (ticketId, articleId)   => api.post(`/api/tickets/${ticketId}/kb/${articleId}`)
+export const unlinkTicketKB   = (ticketId, articleId)   => api.delete(`/api/tickets/${ticketId}/kb/${articleId}`)
+
+// ── Ticket inventory asset links ──────────────────────────────────────────────
+export const getTicketAssets    = (ticketId)           => api.get(`/api/tickets/${ticketId}/inventory-assets`)
+export const linkTicketAsset    = (ticketId, assetId)  => api.post(`/api/tickets/${ticketId}/inventory-assets/${assetId}`)
+export const unlinkTicketAsset  = (ticketId, assetId)  => api.delete(`/api/tickets/${ticketId}/inventory-assets/${assetId}`)

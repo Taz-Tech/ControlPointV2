@@ -1,5 +1,7 @@
 import { useState, useEffect, useContext, useRef, useCallback } from 'react'
+import NotificationSettings from './NotificationSettings.jsx'
 import FloorMapManager from './PortSecurity/FloorMapManager.jsx'
+import TicketSettings from './Ticketing/TicketSettings.jsx'
 import ReactCrop, { centerCrop, makeAspectCrop } from 'react-image-crop'
 import 'react-image-crop/dist/ReactCrop.css'
 import { Document, Page, pdfjs } from 'react-pdf'
@@ -11,14 +13,16 @@ pdfjs.GlobalWorkerOptions.workerSrc = new URL(
   import.meta.url,
 ).toString()
 import { api } from '../api/client.js'
-import { getShortcuts, createShortcut, updateShortcut, deleteShortcut, uploadShortcutIcon, uploadLogo, deleteLogo, uploadFavicon, deleteFavicon, uploadIcon, deleteIcon, getPortalUsers, updateUserRole, updateUserProfile, updateUserRCAccess, inviteUser, deletePortalUser,
-  getSites, createSite, deleteSite, getSwitches, getMaps, getMap, addSwitch, deleteSwitch, uploadMap, deleteMap,
+import { getShortcuts, createShortcut, updateShortcut, deleteShortcut, uploadShortcutIcon, uploadLogo, deleteLogo, uploadFavicon, deleteFavicon, uploadIcon, deleteIcon, getPortalUsers, updateUserRole, updateUserProfile, updateUserRCAccess, adminSetUserPassword, inviteUser, deletePortalUser,
+  getSites, createSite, deleteSite, setSiteCustomer, getSwitches, getMaps, getMap, addSwitch, deleteSwitch, uploadMap, deleteMap,
   addSwitchToSite, removeSwitchFromSite, addMapToSite, removeMapFromSite, linkUnifiHost, setSiteUnifiSiteName, getUnifiHosts, getHostControllerSites, syncUnifiDevices,
   getIntegrations, updateIntegration, testIntegration, toggleIntegration, uploadIntegrationFile, uploadIntegrationLogo,
+  getClientIntegrations, createClientIntegration, updateClientIntegration, deleteClientIntegration, toggleClientIntegration, testClientIntegration,
   syncDirectory, syncAllDevices, getDirectoryUsers, getDeviceInventory,
   getConferenceRooms, getRoomConfigs, upsertRoomConfig, deleteRoomConfig,
-  getRoles, createRole, updateRole, deleteRole } from '../api/client.js'
+  getRoles, createRole, updateRole, deleteRole, getAssetCustomers } from '../api/client.js'
 import { UserContext } from '../App.jsx'
+import ClientsWorkspace from './Clients/ClientsWorkspace.jsx'
 
 function InfoRow({ label, value, mono }) {
   return (
@@ -429,11 +433,15 @@ function QuickLinksTab() {
 /* ── Users tab (admin only) ──────────────────────────────────────────────── */
 
 function UserRow({ user, onUpdate, onDelete, roles }) {
-  const [editing,  setEditing]  = useState(false)
-  const [form,     setForm]     = useState({ first_name: user.first_name || '', last_name: user.last_name || '', rc_extension_id: user.rc_extension_id || '' })
-  const [saving,   setSaving]   = useState(false)
-  const [deleting, setDeleting] = useState(false)
-  const [err,      setErr]      = useState(null)
+  const [editing,      setEditing]      = useState(false)
+  const [form,         setForm]         = useState({ first_name: user.first_name || '', last_name: user.last_name || '', rc_extension_id: user.rc_extension_id || '' })
+  const [saving,       setSaving]       = useState(false)
+  const [deleting,     setDeleting]     = useState(false)
+  const [err,          setErr]          = useState(null)
+  const [showPwForm,   setShowPwForm]   = useState(false)
+  const [newPassword,  setNewPassword]  = useState('')
+  const [pwSaving,     setPwSaving]     = useState(false)
+  const [pwMsg,        setPwMsg]        = useState(null)
 
   const initials = `${(user.first_name||'')[0]||''}${(user.last_name||'')[0]||''}`.toUpperCase() || '?'
   const lastSeen = user.last_seen ? new Date(user.last_seen).toLocaleString() : 'Never'
@@ -484,6 +492,21 @@ function UserRow({ user, onUpdate, onDelete, roles }) {
       onUpdate({ ...user, rc_presence_access: r.data.rc_presence_access })
     } catch (e) {
       setErr(e.response?.data?.detail || 'Failed to update RC access')
+    }
+  }
+
+  const handleSetPassword = async () => {
+    if (newPassword.length < 8) { setPwMsg({ ok: false, text: 'Password must be at least 8 characters' }); return }
+    setPwSaving(true); setPwMsg(null)
+    try {
+      await adminSetUserPassword(user.id, newPassword)
+      setPwMsg({ ok: true, text: 'Password set successfully' })
+      setNewPassword('')
+      setTimeout(() => { setShowPwForm(false); setPwMsg(null) }, 1500)
+    } catch (e) {
+      setPwMsg({ ok: false, text: e.response?.data?.detail || 'Failed to set password' })
+    } finally {
+      setPwSaving(false)
     }
   }
 
@@ -565,6 +588,13 @@ function UserRow({ user, onUpdate, onDelete, roles }) {
                 ✏️
               </button>
             )}
+            {!user.invited && (
+              <button className="btn btn-ghost" style={{ fontSize: '0.75rem', padding: '4px 10px' }}
+                onClick={() => { setShowPwForm(f => !f); setPwMsg(null); setNewPassword('') }}
+                title="Set password">
+                🔑
+              </button>
+            )}
             <select className="select" style={{ width: 'auto', fontSize: '0.78rem', padding: '4px 8px' }}
               value={user.role} onChange={e => handleRoleChange(e.target.value)}>
               {(roles && roles.length > 0 ? roles : ALL_ROLES.map(r => ({ name: r.value, label: r.label }))).map(r => (
@@ -616,6 +646,36 @@ function UserRow({ user, onUpdate, onDelete, roles }) {
           </span>
         </div>
       )}
+
+      {showPwForm && !user.invited && (
+        <div style={{ marginTop: 8, paddingTop: 10, borderTop: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontSize: '0.72rem', fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', flexShrink: 0 }}>
+            Set password
+          </span>
+          <input
+            className="input"
+            type="password"
+            placeholder="New password (min 8 chars)"
+            value={newPassword}
+            onChange={e => setNewPassword(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && handleSetPassword()}
+            style={{ flex: 1, fontSize: '0.82rem', padding: '4px 8px' }}
+          />
+          <button className="btn btn-primary" style={{ fontSize: '0.75rem', padding: '4px 10px', flexShrink: 0 }}
+            onClick={handleSetPassword} disabled={pwSaving || newPassword.length < 1}>
+            {pwSaving ? '…' : 'Save'}
+          </button>
+          <button className="btn btn-ghost" style={{ fontSize: '0.75rem', padding: '4px 8px', flexShrink: 0 }}
+            onClick={() => { setShowPwForm(false); setPwMsg(null); setNewPassword('') }}>
+            Cancel
+          </button>
+          {pwMsg && (
+            <span style={{ fontSize: '0.75rem', color: pwMsg.ok ? '#22c55e' : '#ef4444', flexShrink: 0 }}>
+              {pwMsg.text}
+            </span>
+          )}
+        </div>
+      )}
     </div>
   )
 }
@@ -665,12 +725,12 @@ function UsersTab() {
   return (
     <div>
       <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', marginBottom: 20, lineHeight: 1.6 }}>
-        Manage portal access. Invite users by email before they sign in to restrict access — or leave open for any company account.
+        Manage agent access. Invite agents by email to grant them access to the portal.
       </p>
 
       {/* Invite form */}
       <div style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border)', borderRadius: 'var(--radius-md)', padding: 16, marginBottom: 20 }}>
-        <div style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 12, textTransform: 'uppercase', letterSpacing: '0.08em' }}>Invite User</div>
+        <div style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 12, textTransform: 'uppercase', letterSpacing: '0.08em' }}>Invite Agent</div>
         {inviteErr && <div className="alert alert-error" style={{ marginBottom: 10, fontSize: '0.8rem' }}>{inviteErr}</div>}
         <div style={{ display: 'flex', gap: 10, alignItems: 'flex-end' }}>
           <div className="form-group" style={{ flex: 1, marginBottom: 0 }}>
@@ -682,18 +742,15 @@ function UsersTab() {
             {inviting ? 'Inviting…' : '+ Invite'}
           </button>
         </div>
-        <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: 8, marginBottom: 0 }}>
-          Add <code>REQUIRE_PREREGISTRATION=true</code> to <code>.env</code> to block uninvited users from signing in.
-        </p>
       </div>
 
       {err && <div className="alert alert-error" style={{ marginBottom: 12 }}>{err}</div>}
       {loading ? (
         <div className="flex items-center gap-2" style={{ color: 'var(--text-secondary)' }}>
-          <div className="spinner" /><span className="text-sm">Loading users…</span>
+          <div className="spinner" /><span className="text-sm">Loading agents…</span>
         </div>
       ) : users.length === 0 ? (
-        <p className="text-sm text-muted">No users yet. Invite someone above.</p>
+        <p className="text-sm text-muted">No agents yet. Invite someone above.</p>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           {users.map(u => <UserRow key={u.id} user={u} onUpdate={handleUpdate} onDelete={handleDelete} roles={roles} />)}
@@ -850,6 +907,9 @@ function IntegrationSetupPage({ integration: intg, onExit, onSaved }) {
   const [fields,        setFields]        = useState(
     Object.fromEntries(intg.fields.map(f => [f.key, f.value ?? '']))
   )
+  const [baseFields,    setBaseFields]    = useState(
+    Object.fromEntries(intg.fields.map(f => [f.key, f.value ?? '']))
+  )
   const [show,          setShow]          = useState({})
   const [saving,        setSaving]        = useState(false)
   const [saveMsg,       setSaveMsg]       = useState(null)
@@ -864,8 +924,40 @@ function IntegrationSetupPage({ integration: intg, onExit, onSaved }) {
   const [syncing,       setSyncing]       = useState(false)
   const [syncResult,    setSyncResult]    = useState(null)
   const [lastSynced,    setLastSynced]    = useState(null)
+  const [selectedCustomerId, setSelectedCustomerId] = useState(null)
+  const [customers,          setCustomers]          = useState([])
+  const [existingCI,         setExistingCI]         = useState(null)
   const fileInputRefs = useRef({})
   const logoInputRef  = useRef(null)
+
+  useEffect(() => {
+    getAssetCustomers().then(r => setCustomers(r.data || []))
+  }, [])
+
+  useEffect(() => {
+    if (selectedCustomerId === null) {
+      const globalFields = Object.fromEntries(intg.fields.map(f => [f.key, f.value ?? '']))
+      setFields(globalFields)
+      setBaseFields(globalFields)
+      setExistingCI(null)
+      return
+    }
+    getClientIntegrations(selectedCustomerId).then(r => {
+      const ci = (r.data || []).find(c => c.integration_type === intg.id)
+      if (ci) {
+        setExistingCI(ci)
+        const vals = JSON.parse(ci.values_json || '{}')
+        const populated = Object.fromEntries(intg.fields.map(f => [f.key, vals[f.key] ?? '']))
+        setFields(populated)
+        setBaseFields(populated)
+      } else {
+        setExistingCI(null)
+        const empty = Object.fromEntries(intg.fields.map(f => [f.key, '']))
+        setFields(empty)
+        setBaseFields(empty)
+      }
+    })
+  }, [selectedCustomerId]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const syncDef = SYNC_MAP[intg.id]
 
@@ -901,17 +993,31 @@ function IntegrationSetupPage({ integration: intg, onExit, onSaved }) {
   const dirty = intg.fields.some(f => {
     if (f.type === 'file') return false
     const current = fields[f.key] ?? ''
-    const original = f.value ?? ''
-    return current !== original && !(f.secret && current === MASK)
+    const base = baseFields[f.key] ?? ''
+    return current !== base && !(f.secret && current === MASK)
   })
 
   const handleSave = async () => {
     setSaving(true); setErr(null); setSaveMsg(null)
     try {
-      await updateIntegration(intg.id, fields)
+      if (selectedCustomerId === null) {
+        await updateIntegration(intg.id, fields)
+        onSaved()
+      } else if (existingCI) {
+        const r = await updateClientIntegration(existingCI.id, { values: fields })
+        setExistingCI(r.data)
+        const vals = JSON.parse(r.data.values_json || '{}')
+        const updated = Object.fromEntries(intg.fields.map(f => [f.key, vals[f.key] ?? '']))
+        setBaseFields(updated)
+      } else {
+        const r = await createClientIntegration({ customer_id: selectedCustomerId, integration_type: intg.id, values: fields })
+        setExistingCI(r.data)
+        const vals = JSON.parse(r.data.values_json || '{}')
+        const updated = Object.fromEntries(intg.fields.map(f => [f.key, vals[f.key] ?? '']))
+        setBaseFields(updated)
+      }
       setSaveMsg('Saved')
       setTimeout(() => setSaveMsg(null), 3000)
-      onSaved()
     } catch (e) { setErr(e.response?.data?.detail || 'Save failed') }
     finally { setSaving(false) }
   }
@@ -919,7 +1025,12 @@ function IntegrationSetupPage({ integration: intg, onExit, onSaved }) {
   const handleTest = async () => {
     setTesting(true); setTestResult(null)
     try {
-      const r = await testIntegration(intg.id)
+      let r
+      if (selectedCustomerId !== null && existingCI) {
+        r = await testClientIntegration(existingCI.id)
+      } else {
+        r = await testIntegration(intg.id)
+      }
       setTestResult(r.data)
     } catch (e) { setTestResult({ success: false, message: e.response?.data?.detail || 'Request failed' }) }
     finally { setTesting(false) }
@@ -1041,6 +1152,39 @@ function IntegrationSetupPage({ integration: intg, onExit, onSaved }) {
           onClick={onExit}>
           ← All Integrations
         </button>
+      </div>
+
+      {/* ── Client selector bar ── */}
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 10,
+        padding: '10px 16px', marginBottom: 16,
+        background: 'var(--bg-elevated)', border: '1px solid var(--border)',
+        borderRadius: 'var(--radius-sm)',
+      }}>
+        <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)', fontWeight: 500, flexShrink: 0 }}>
+          Configuring for:
+        </span>
+        <select
+          className="input"
+          style={{ fontSize: '0.82rem', padding: '4px 8px', maxWidth: 300, flex: 1 }}
+          value={selectedCustomerId ?? ''}
+          onChange={e => {
+            setSelectedCustomerId(e.target.value ? Number(e.target.value) : null)
+            setTestResult(null); setErr(null); setSaveMsg(null)
+          }}>
+          <option value="">My Organization (Global)</option>
+          {customers.map(c => (
+            <option key={c.id} value={c.id}>{c.name}</option>
+          ))}
+        </select>
+        {selectedCustomerId !== null && (
+          <span style={{ fontSize: '0.72rem', fontWeight: 600, padding: '2px 8px', borderRadius: 8,
+            background: existingCI ? 'rgba(63,185,80,0.1)' : 'rgba(251,191,36,0.1)',
+            color: existingCI ? 'var(--green)' : '#f59e0b',
+          }}>
+            {existingCI ? '● Configured' : '○ Not configured'}
+          </span>
+        )}
       </div>
 
       {/* Sync result banner */}
@@ -1416,6 +1560,246 @@ function IntegrationsTab() {
   )
 }
 
+// ── Client Integrations tab ───────────────────────────────────────────────────
+
+function ClientIntegrationsTab() {
+  const [clientIntegrations, setClientIntegrations] = useState([])
+  const [customers,          setCustomers]          = useState([])
+  const [integrationDefs,    setIntegrationDefs]    = useState([])
+  const [loading,            setLoading]            = useState(true)
+  const [showModal,          setShowModal]          = useState(false)
+  const [editing,            setEditing]            = useState(null)   // ClientIntegration object
+  const [testResult,         setTestResult]         = useState({})
+
+  const load = async () => {
+    setLoading(true)
+    const [ciRes, custRes, intgRes] = await Promise.all([
+      getClientIntegrations(),
+      getAssetCustomers(),
+      getIntegrations(),
+    ])
+    setClientIntegrations(ciRes.data || [])
+    setCustomers(custRes.data || [])
+    setIntegrationDefs(intgRes.data || [])
+    setLoading(false)
+  }
+
+  useEffect(() => { load() }, [])
+
+  const handleDelete = async (id) => {
+    if (!confirm('Remove this client integration?')) return
+    await deleteClientIntegration(id)
+    load()
+  }
+
+  const handleToggle = async (ci) => {
+    await toggleClientIntegration(ci.id, !ci.enabled)
+    load()
+  }
+
+  const handleTest = async (id) => {
+    setTestResult(r => ({ ...r, [id]: { loading: true } }))
+    const res = await testClientIntegration(id).catch(() => ({ data: { success: false, message: 'Request failed' } }))
+    setTestResult(r => ({ ...r, [id]: res.data }))
+  }
+
+  // Group by customer
+  const byCustomer = customers.map(c => ({
+    customer: c,
+    integrations: clientIntegrations.filter(ci => ci.customer_id === c.id),
+  })).filter(g => g.integrations.length > 0 || true)
+
+  const usedTypes = (customerId) => clientIntegrations.filter(ci => ci.customer_id === customerId).map(ci => ci.integration_type)
+
+  return (
+    <div style={{ padding: '24px 28px', maxWidth: 900 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
+        <div>
+          <h2 style={{ fontWeight: 700, fontSize: '1rem', marginBottom: 2 }}>Client Integrations</h2>
+          <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', margin: 0 }}>
+            Each client can have one instance of each integration type.
+          </p>
+        </div>
+        <button className="btn btn-primary" style={{ fontSize: '0.82rem' }} onClick={() => { setEditing(null); setShowModal(true) }}>
+          + Add Integration
+        </button>
+      </div>
+
+      {loading ? (
+        <div style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>Loading…</div>
+      ) : clientIntegrations.length === 0 ? (
+        <div style={{ color: 'var(--text-muted)', fontSize: '0.85rem', padding: '40px 0', textAlign: 'center' }}>
+          No client integrations yet. Click + Add Integration to configure one.
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
+          {customers.filter(c => clientIntegrations.some(ci => ci.customer_id === c.id)).map(c => (
+            <div key={c.id}>
+              <div style={{ fontSize: '0.72rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 10 }}>
+                🏢 {c.name}
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {clientIntegrations.filter(ci => ci.customer_id === c.id).map(ci => {
+                  const tr = testResult[ci.id]
+                  return (
+                    <div key={ci.id} className="card" style={{ padding: '14px 18px', display: 'flex', alignItems: 'center', gap: 14 }}>
+                      <span style={{ fontSize: '1.5rem', flexShrink: 0 }}>{ci.icon}</span>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontWeight: 600, fontSize: '0.88rem' }}>{ci.name}</div>
+                        {ci.label && <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>{ci.label}</div>}
+                      </div>
+                      <span style={{
+                        fontSize: '0.68rem', fontWeight: 600, padding: '2px 8px', borderRadius: 8,
+                        background: ci.configured ? '#22c55e22' : '#f59e0b22',
+                        color:      ci.configured ? '#22c55e'   : '#f59e0b',
+                      }}>{ci.configured ? 'Configured' : 'Incomplete'}</span>
+                      {tr && !tr.loading && (
+                        <span style={{ fontSize: '0.75rem', color: tr.success ? '#22c55e' : '#ef4444' }}>
+                          {tr.success ? '✓' : '✗'} {tr.message}
+                        </span>
+                      )}
+                      <button className="btn btn-ghost" style={{ fontSize: '0.75rem', padding: '3px 8px' }}
+                        onClick={() => handleTest(ci.id)} disabled={tr?.loading}>
+                        {tr?.loading ? '…' : 'Test'}
+                      </button>
+                      <button className="btn btn-ghost" style={{ fontSize: '0.75rem', padding: '3px 8px' }}
+                        onClick={() => { setEditing(ci); setShowModal(true) }}>
+                        Edit
+                      </button>
+                      <button className="btn btn-ghost" style={{ fontSize: '0.75rem', padding: '3px 8px', color: ci.enabled ? 'var(--text-muted)' : 'var(--cyan)' }}
+                        onClick={() => handleToggle(ci)}>
+                        {ci.enabled ? 'Disable' : 'Enable'}
+                      </button>
+                      <button className="btn btn-ghost" style={{ fontSize: '0.75rem', padding: '3px 8px', color: '#ef4444' }}
+                        onClick={() => handleDelete(ci.id)}>
+                        Remove
+                      </button>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {showModal && (
+        <ClientIntegrationModal
+          editing={editing}
+          customers={customers}
+          integrationDefs={integrationDefs}
+          usedTypes={usedTypes}
+          onClose={() => { setShowModal(false); setEditing(null) }}
+          onSaved={() => { setShowModal(false); setEditing(null); load() }}
+        />
+      )}
+    </div>
+  )
+}
+
+function ClientIntegrationModal({ editing, customers, integrationDefs, usedTypes, onClose, onSaved, lockedType }) {
+  const [customerId,  setCustomerId]  = useState(editing?.customer_id ?? '')
+  const [intgType,    setIntgType]    = useState(editing?.integration_type ?? lockedType ?? '')
+  const [label,       setLabel]       = useState(editing?.label ?? '')
+  const [fieldVals,   setFieldVals]   = useState(() => {
+    if (!editing) return {}
+    const vals = {}
+    for (const f of editing.fields || []) vals[f.key] = f.value || ''
+    return vals
+  })
+  const [saving, setSaving] = useState(false)
+  const [error,  setError]  = useState('')
+
+  const selectedDef = integrationDefs.find(d => d.id === intgType)
+  const availableTypes = integrationDefs.filter(d => {
+    if (!customerId) return true
+    const used = usedTypes(parseInt(customerId))
+    return !used.includes(d.id) || d.id === editing?.integration_type
+  })
+
+  const setVal = (k, v) => setFieldVals(prev => ({ ...prev, [k]: v }))
+
+  const submit = async () => {
+    if (!customerId || !intgType) { setError('Select a client and integration type.'); return }
+    setSaving(true)
+    setError('')
+    try {
+      if (editing) {
+        await updateClientIntegration(editing.id, { label: label || null, values: fieldVals })
+      } else {
+        await createClientIntegration({ customer_id: parseInt(customerId), integration_type: intgType, label: label || null, values: fieldVals })
+      }
+      onSaved()
+    } catch (e) {
+      setError(e.response?.data?.detail || 'Save failed')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 2000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}>
+      <div style={{ background: 'var(--bg-surface)', borderRadius: 12, width: '100%', maxWidth: 560, maxHeight: '90vh', display: 'flex', flexDirection: 'column', boxShadow: '0 24px 48px rgba(0,0,0,0.4)' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '16px 20px', borderBottom: '1px solid var(--border)' }}>
+          <h3 style={{ fontWeight: 700, fontSize: '1rem' }}>{editing ? 'Edit Integration' : 'Add Client Integration'}</h3>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '1.2rem', color: 'var(--text-muted)' }}>×</button>
+        </div>
+        <div style={{ flex: 1, overflowY: 'auto', padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+          {error && <div style={{ color: '#ef4444', fontSize: '0.82rem', background: '#ef444422', borderRadius: 6, padding: '8px 12px' }}>{error}</div>}
+
+          <div>
+            <div style={{ fontSize: '0.72rem', fontWeight: 600, color: 'var(--text-muted)', marginBottom: 4 }}>Client *</div>
+            <select className="select" value={customerId} onChange={e => { setCustomerId(e.target.value); setIntgType('') }} disabled={!!editing} style={{ width: '100%' }}>
+              <option value="">— Select client —</option>
+              {customers.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          </div>
+
+          {!lockedType && (
+            <div>
+              <div style={{ fontSize: '0.72rem', fontWeight: 600, color: 'var(--text-muted)', marginBottom: 4 }}>Integration Type *</div>
+              <select className="select" value={intgType} onChange={e => setIntgType(e.target.value)} disabled={!!editing} style={{ width: '100%' }}>
+                <option value="">— Select integration —</option>
+                {availableTypes.map(d => <option key={d.id} value={d.id}>{d.icon} {d.name}</option>)}
+              </select>
+            </div>
+          )}
+
+          <div>
+            <div style={{ fontSize: '0.72rem', fontWeight: 600, color: 'var(--text-muted)', marginBottom: 4 }}>Label (optional)</div>
+            <input className="input" value={label} onChange={e => setLabel(e.target.value)} placeholder="e.g. Production Freshservice" style={{ width: '100%' }} />
+          </div>
+
+          {selectedDef && (
+            <div style={{ borderTop: '1px solid var(--border)', paddingTop: 14, display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <div style={{ fontSize: '0.78rem', fontWeight: 600, color: 'var(--text-primary)' }}>Connection Details</div>
+              {selectedDef.fields.map(f => (
+                <div key={f.key}>
+                  <div style={{ fontSize: '0.72rem', fontWeight: 600, color: 'var(--text-muted)', marginBottom: 4 }}>{f.label}{f.optional ? '' : ' *'}</div>
+                  <input
+                    className="input"
+                    type={f.secret ? 'password' : 'text'}
+                    value={fieldVals[f.key] || ''}
+                    onChange={e => setVal(f.key, e.target.value)}
+                    placeholder={f.placeholder || (f.secret && editing ? '(unchanged)' : '')}
+                    style={{ width: '100%' }}
+                  />
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+        <div style={{ padding: '12px 20px', borderTop: '1px solid var(--border)', display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+          <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
+          <button className="btn btn-primary" onClick={submit} disabled={saving || !customerId || !intgType}>
+            {saving ? 'Saving…' : editing ? 'Save Changes' : 'Add Integration'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function SidebarCatItem({ label, count, active, onClick, accent = false }) {
   return (
     <button
@@ -1452,7 +1836,7 @@ function SidebarCatItem({ label, count, active, onClick, accent = false }) {
 
 /* ── Sites tab (admin only) ──────────────────────────────────────────────── */
 
-function SiteCard({ site, allSwitches, allMaps, allSites, onRefresh }) {
+function SiteCard({ site, allSwitches, allMaps, allSites, clients = [], onRefresh }) {
   const [expanded,       setExpanded]       = useState(false)
   const [swForm,         setSwForm]         = useState({ name: '', ip_address: '', stack_position: '1' })
   const [swAdding,       setSwAdding]       = useState(false)
@@ -1544,6 +1928,11 @@ function SiteCard({ site, allSwitches, allMaps, allSites, onRefresh }) {
   const handleSetUnifiSite = async (siteName) => {
     try { await setSiteUnifiSiteName(site.id, siteName || null); await onRefresh() }
     catch { setErr('Failed to update UniFi site') }
+  }
+
+  const handleSetClient = async (customerId) => {
+    try { await setSiteCustomer(site.id, customerId ? parseInt(customerId) : null); await onRefresh() }
+    catch { setErr('Failed to update client assignment') }
   }
 
   const handleOpenSeatEditor = async (fm) => {
@@ -1665,6 +2054,11 @@ function SiteCard({ site, allSwitches, allMaps, allSites, onRefresh }) {
           <span className="badge badge-gray" style={{ fontSize: '0.7rem' }}>
             {site.switches.length} switch{site.switches.length !== 1 ? 'es' : ''} · {site.maps.length} map{site.maps.length !== 1 ? 's' : ''}
           </span>
+          {site.customer_id && clients.find(c => c.id === site.customer_id) && (
+            <span className="badge" style={{ fontSize: '0.7rem', background: 'rgba(59,130,246,0.12)', color: '#3b82f6', border: '1px solid rgba(59,130,246,0.3)', borderRadius: 4 }}>
+              {clients.find(c => c.id === site.customer_id).name}
+            </span>
+          )}
           {site.unifi_host_id && (
             <span className="badge" style={{ fontSize: '0.7rem', background: 'rgba(6,182,212,0.12)', color: 'var(--cyan)', border: '1px solid rgba(6,182,212,0.3)', borderRadius: 4 }}>
               📡 UniFi linked
@@ -1684,6 +2078,20 @@ function SiteCard({ site, allSwitches, allMaps, allSites, onRefresh }) {
       {expanded && (
         <div style={{ padding: '16px 16px 8px' }}>
           {err && <div className="alert alert-error" style={{ marginBottom: 12, fontSize: '0.8rem' }}>{err}</div>}
+
+          {/* ── CLIENT ASSIGNMENT ── */}
+          {clients.length > 0 && (
+            <div style={{ marginBottom: 20 }}>
+              <div style={sectionLabel}>Client</div>
+              <div style={{ marginTop: 8 }}>
+                <select className="select" style={{ fontSize: '0.8rem', maxWidth: 320 }}
+                  value={site.customer_id || ''} onChange={e => handleSetClient(e.target.value)}>
+                  {!site.customer_id && <option value="">— Select a client —</option>}
+                  {clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                </select>
+              </div>
+            </div>
+          )}
 
           {/* ── NETWORK ── */}
           <div style={{ marginBottom: 20 }}>
@@ -1978,32 +2386,37 @@ function SitesTab() {
   const [sites,       setSites]       = useState([])
   const [allSwitches, setAllSwitches] = useState([])
   const [allMaps,     setAllMaps]     = useState([])
+  const [clients,     setClients]     = useState([])
   const [loading,     setLoading]     = useState(true)
   const [err,         setErr]         = useState(null)
   const [showModal,   setShowModal]   = useState(false)
   const [newName,     setNewName]     = useState('')
+  const [newClientId, setNewClientId] = useState('')
   const [saving,      setSaving]      = useState(false)
 
   const reload = async () => {
     try {
-      const [sitesRes, swRes, mapsRes] = await Promise.all([getSites(), getSwitches(), getMaps()])
+      const [sitesRes, swRes, mapsRes, clientsRes] = await Promise.all([getSites(), getSwitches(), getMaps(), api.get('/api/tickets/customers')])
       setSites(sitesRes.data)
       setAllSwitches(swRes.data)
       setAllMaps(mapsRes.data)
+      setClients(clientsRes.data)
     } catch { setErr('Failed to load sites') }
     finally { setLoading(false) }
   }
 
   useEffect(() => { reload() }, [])
 
-  const openModal  = () => { setNewName(''); setErr(null); setShowModal(true) }
-  const closeModal = () => { setShowModal(false); setNewName('') }
+  const openModal = (preselectedClientId = '') => {
+    setNewName(''); setNewClientId(preselectedClientId ? String(preselectedClientId) : (clients.length === 1 ? String(clients[0].id) : '')); setErr(null); setShowModal(true)
+  }
+  const closeModal = () => { setShowModal(false); setNewName(''); setNewClientId('') }
 
   const handleCreate = async () => {
-    if (!newName.trim()) return
+    if (!newName.trim() || !newClientId) return
     setSaving(true); setErr(null)
     try {
-      await createSite(newName.trim())
+      await createSite(newName.trim(), parseInt(newClientId))
       closeModal()
       await reload()
     } catch (e) { setErr(e.response?.data?.detail || 'Failed to create site') }
@@ -2012,32 +2425,73 @@ function SitesTab() {
 
   if (loading) return <div className="flex items-center gap-2" style={{ color: 'var(--text-secondary)' }}><div className="spinner" /><span className="text-sm">Loading…</span></div>
 
+  // Group sites by client
+  const sitesByClient = clients.map(c => ({
+    client: c,
+    sites: sites.filter(s => s.customer_id === c.id),
+  }))
+  const unassigned = sites.filter(s => !s.customer_id)
+
   return (
     <div>
       {/* Header row */}
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 20, gap: 16 }}>
         <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', lineHeight: 1.6, margin: 0 }}>
-          Sites group switches and floor maps for Port Security. Select a site in Deployment Tools to scope the view to that site's equipment.
+          Each site belongs to a client. Sites group switches and floor maps for Port Security.
         </p>
-        <button className="btn btn-primary" style={{ fontSize: '0.82rem', flexShrink: 0 }} onClick={openModal}>
+        <button className="btn btn-primary" style={{ fontSize: '0.82rem', flexShrink: 0 }}
+          onClick={() => openModal()} disabled={clients.length === 0}>
           + New Site
         </button>
       </div>
 
-      {err && <div className="alert alert-error" style={{ marginBottom: 12 }}>{err}</div>}
-
-      {/* Site cards */}
-      {sites.length === 0 ? (
+      {clients.length === 0 && (
         <div style={{ textAlign: 'center', padding: '48px 0', color: 'var(--text-muted)' }}>
           <div style={{ fontSize: '2.5rem', marginBottom: 12, opacity: 0.4 }}>🏢</div>
-          <p style={{ fontSize: '0.9rem', marginBottom: 16 }}>No sites configured yet.</p>
-          <button className="btn btn-primary" style={{ fontSize: '0.82rem' }} onClick={openModal}>+ New Site</button>
+          <p style={{ fontSize: '0.9rem' }}>No clients yet. Add a client in the <strong>Clients</strong> tab before creating sites.</p>
         </div>
-      ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-          {sites.map(site => (
-            <SiteCard key={site.id} site={site} allSwitches={allSwitches} allMaps={allMaps} allSites={sites} onRefresh={reload} />
-          ))}
+      )}
+
+      {err && <div className="alert alert-error" style={{ marginBottom: 12 }}>{err}</div>}
+
+      {/* Sites grouped by client */}
+      {sitesByClient.map(({ client, sites: clientSites }) => (
+        <div key={client.id} style={{ marginBottom: 28 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ fontSize: '0.72rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>{client.name}</span>
+              <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', background: 'var(--bg-elevated)', padding: '1px 7px', borderRadius: 8 }}>
+                {clientSites.length} site{clientSites.length !== 1 ? 's' : ''}
+              </span>
+            </div>
+            <button className="btn btn-ghost" style={{ fontSize: '0.75rem', padding: '3px 10px' }}
+              onClick={() => openModal(client.id)}>+ Add Site</button>
+          </div>
+          {clientSites.length === 0 ? (
+            <div style={{ padding: '16px', background: 'var(--bg-elevated)', border: '1px dashed var(--border)', borderRadius: 'var(--radius-md)', color: 'var(--text-muted)', fontSize: '0.83rem', textAlign: 'center' }}>
+              No sites for this client yet
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {clientSites.map(site => (
+                <SiteCard key={site.id} site={site} allSwitches={allSwitches} allMaps={allMaps} allSites={sites} clients={clients} onRefresh={reload} />
+              ))}
+            </div>
+          )}
+        </div>
+      ))}
+
+      {/* Legacy unassigned sites */}
+      {unassigned.length > 0 && (
+        <div style={{ marginBottom: 28 }}>
+          <div style={{ fontSize: '0.72rem', fontWeight: 700, color: '#f59e0b', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 10 }}>
+            ⚠ Unassigned ({unassigned.length}) — assign these to a client
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {unassigned.map(site => (
+              <SiteCard key={site.id} site={site} allSwitches={allSwitches} allMaps={allMaps} allSites={sites} clients={clients} onRefresh={reload} />
+            ))}
+          </div>
         </div>
       )}
 
@@ -2056,21 +2510,28 @@ function SitesTab() {
 
             {err && <div className="alert alert-error" style={{ marginBottom: 14, fontSize: '0.82rem' }}>{err}</div>}
 
+            <div className="form-group" style={{ marginBottom: 16 }}>
+              <label>Client <span style={{ color: 'var(--red)' }}>*</span></label>
+              <select className="select" value={newClientId} onChange={e => setNewClientId(e.target.value)} autoFocus>
+                <option value="">— Select a client —</option>
+                {clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+            </div>
+
             <div className="form-group" style={{ marginBottom: 20 }}>
-              <label>Site Name</label>
+              <label>Site Name <span style={{ color: 'var(--red)' }}>*</span></label>
               <input
                 className="input"
                 placeholder="e.g. Headquarters, Branch Office 1"
                 value={newName}
                 onChange={e => setNewName(e.target.value)}
                 onKeyDown={e => e.key === 'Enter' && handleCreate()}
-                autoFocus
               />
             </div>
 
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
               <button className="btn btn-ghost" onClick={closeModal} disabled={saving}>Cancel</button>
-              <button className="btn btn-primary" onClick={handleCreate} disabled={saving || !newName.trim()}>
+              <button className="btn btn-primary" onClick={handleCreate} disabled={saving || !newName.trim() || !newClientId}>
                 {saving ? 'Creating…' : 'Create Site'}
               </button>
             </div>
@@ -2122,14 +2583,7 @@ function BrandingUploadRow({ label, hint, url, onUpload, onRemove, uploading, ac
   )
 }
 
-const THEMES = [
-  { id: 'dark',      label: 'Dark',      bg: '#0d1117', surface: '#161b22', accent: '#21d4fd', text: '#e6edf3' },
-  { id: 'light',     label: 'Light',     bg: '#f0f2f5', surface: '#ffffff', accent: '#0891b2', text: '#1f2328' },
-  { id: 'cyberpunk',   label: 'Cyberpunk',   bg: '#08000f', surface: '#0f0019', accent: '#ff006e', text: '#f5e6ff' },
-  { id: 'night-city', label: 'Night City', bg: '#080808', surface: '#111111', accent: '#ffe600', text: '#faf5d7' },
-]
-
-function GeneralTab({ config, isAdmin, theme, setTheme }) {
+function GeneralTab({ config, isAdmin }) {
   const [favicon,       setFavicon]       = useState('')
   const [icon,          setIcon]          = useState('')
   const [favUploading,  setFavUploading]  = useState(false)
@@ -2182,59 +2636,6 @@ function GeneralTab({ config, isAdmin, theme, setTheme }) {
       <InfoRow label="Portal Name" value="ControlPoint" />
       <InfoRow label="Company"     value="Claim Assist Solutions" />
       <InfoRow label="Version"     value="1.0.0" />
-
-      <div style={{ marginTop: 24 }}>
-        <div style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 12 }}>
-          Theme
-        </div>
-        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-          {THEMES.map(t => (
-            <button
-              key={t.id}
-              onClick={() => setTheme(t.id)}
-              style={{
-                border: `2px solid ${theme === t.id ? 'var(--cyan)' : 'var(--border)'}`,
-                borderRadius: 'var(--radius-md)',
-                background: 'none',
-                cursor: 'pointer',
-                padding: 0,
-                overflow: 'hidden',
-                width: 120,
-                transition: 'var(--transition)',
-                boxShadow: theme === t.id ? 'var(--cyan-glow)' : 'none',
-              }}
-            >
-              <div style={{ background: t.bg, padding: 10, height: 64, position: 'relative' }}>
-                <div style={{ background: t.surface, borderRadius: 4, height: 10, width: '70%', marginBottom: 5 }} />
-                <div style={{ background: t.surface, borderRadius: 4, height: 7, width: '50%', marginBottom: 4 }} />
-                <div style={{ background: t.surface, borderRadius: 4, height: 7, width: '60%' }} />
-                <div style={{
-                  position: 'absolute', bottom: 8, right: 8,
-                  width: 18, height: 18, borderRadius: '50%',
-                  background: t.accent,
-                  boxShadow: `0 0 8px ${t.accent}`,
-                }} />
-              </div>
-              <div style={{
-                padding: '6px 10px',
-                fontSize: '0.75rem',
-                fontWeight: 600,
-                color: theme === t.id ? 'var(--cyan)' : 'var(--text-secondary)',
-                fontFamily: 'var(--font-sans)',
-                borderTop: `1px solid ${theme === t.id ? 'var(--cyan)' : 'var(--border)'}`,
-                background: 'var(--bg-elevated)',
-                textAlign: 'left',
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-              }}>
-                {t.label}
-                {theme === t.id && <span style={{ fontSize: '0.65rem' }}>✓</span>}
-              </div>
-            </button>
-          ))}
-        </div>
-      </div>
 
       {msg && <div className="alert alert-info" style={{ marginTop: 16 }}>✓ {msg}</div>}
       {err && <div className="alert alert-error" style={{ marginTop: 16 }}>{err}</div>}
@@ -2786,7 +3187,7 @@ const PERMISSION_GROUPS = [
     key: 'settings', label: 'Settings Tabs', hint: 'Which Settings tabs are accessible',
     perms: [
       { key: 'settings.quick_links',      label: 'Quick Links' },
-      { key: 'settings.users',            label: 'User Management' },
+      { key: 'settings.users',            label: 'Agent Management' },
       { key: 'settings.sites',            label: 'Sites' },
       { key: 'settings.conference_rooms', label: 'Conference Rooms' },
       { key: 'settings.integrations',     label: 'Integrations' },
@@ -3032,86 +3433,506 @@ function RolesTab() {
   )
 }
 
+/* ── Audit Log page ──────────────────────────────────────────────────────── */
+
+const CATEGORY_OPTIONS = [
+  { id: '',                label: 'All Categories' },
+  { id: 'auth',            label: 'Authentication' },
+  { id: 'user_management', label: 'User Management' },
+  { id: 'roles',           label: 'Roles' },
+  { id: 'system_settings', label: 'System Settings' },
+  { id: 'integrations',    label: 'Integrations' },
+]
+
+const ACTION_META = {
+  'user.first_login':      { icon: '🔑', color: '#06b6d4' },
+  'user.invited':          { icon: '✉️', color: '#8b5cf6' },
+  'user.deleted':          { icon: '🗑️', color: '#ef4444' },
+  'user.invite_rescinded': { icon: '✂️', color: '#f97316' },
+  'user.role_changed':     { icon: '🔄', color: '#f59e0b' },
+  'user.profile_updated':  { icon: '✏️', color: '#06b6d4' },
+  'user.password_set':     { icon: '🔒', color: '#8b5cf6' },
+  'user.rc_access_changed':{ icon: '📞', color: '#06b6d4' },
+  'role.created':          { icon: '➕', color: '#22c55e' },
+  'role.updated':          { icon: '✏️', color: '#f59e0b' },
+  'role.deleted':          { icon: '🗑️', color: '#ef4444' },
+  'branding.logo_uploaded':   { icon: '🖼️', color: '#06b6d4' },
+  'branding.logo_deleted':    { icon: '🗑️', color: '#ef4444' },
+  'branding.favicon_uploaded':{ icon: '🖼️', color: '#06b6d4' },
+  'branding.favicon_deleted': { icon: '🗑️', color: '#ef4444' },
+  'branding.icon_uploaded':   { icon: '🖼️', color: '#06b6d4' },
+  'branding.icon_deleted':    { icon: '🗑️', color: '#ef4444' },
+}
+
+function actionLabel(action) {
+  const map = {
+    'user.first_login':       'First Login',
+    'user.invited':           'User Invited',
+    'user.deleted':           'User Deleted',
+    'user.invite_rescinded':  'Invite Rescinded',
+    'user.role_changed':      'Role Changed',
+    'user.profile_updated':   'Profile Updated',
+    'user.password_set':      'Password Set',
+    'user.rc_access_changed': 'RC Access Changed',
+    'role.created':           'Role Created',
+    'role.updated':           'Role Updated',
+    'role.deleted':           'Role Deleted',
+    'branding.logo_uploaded':    'Logo Uploaded',
+    'branding.logo_deleted':     'Logo Deleted',
+    'branding.favicon_uploaded': 'Favicon Uploaded',
+    'branding.favicon_deleted':  'Favicon Deleted',
+    'branding.icon_uploaded':    'Icon Uploaded',
+    'branding.icon_deleted':     'Icon Deleted',
+  }
+  return map[action] || action
+}
+
+function fmtTs(iso) {
+  if (!iso) return '—'
+  const d = new Date(iso)
+  return d.toLocaleString('en-US', {
+    month: 'short', day: 'numeric', year: 'numeric',
+    hour: 'numeric', minute: '2-digit', hour12: true,
+  })
+}
+
+function AuditLogPage() {
+  const [logs,     setLogs]     = useState([])
+  const [loading,  setLoading]  = useState(true)
+  const [search,   setSearch]   = useState('')
+  const [category, setCategory] = useState('')
+  const [offset,   setOffset]   = useState(0)
+  const [hasMore,  setHasMore]  = useState(false)
+  const LIMIT = 50
+
+  const load = async (newOffset = 0, reset = false) => {
+    setLoading(true)
+    try {
+      const params = { limit: LIMIT, offset: newOffset }
+      if (category) params.category = category
+      if (search.trim()) params.search = search.trim()
+      const r = await api.get('/api/audit-logs/', { params })
+      const rows = r.data
+      setLogs(prev => reset ? rows : [...prev, ...rows])
+      setOffset(newOffset + rows.length)
+      setHasMore(rows.length === LIMIT)
+    } catch { /* swallow */ }
+    finally { setLoading(false) }
+  }
+
+  useEffect(() => { load(0, true) }, [category])
+
+  const handleSearch = (e) => {
+    e.preventDefault()
+    load(0, true)
+  }
+
+  return (
+    <div style={{ maxWidth: 900 }}>
+      {/* Filters */}
+      <div style={{ display: 'flex', gap: 10, marginBottom: 20, flexWrap: 'wrap' }}>
+        <form onSubmit={handleSearch} style={{ display: 'flex', gap: 8, flex: 1, minWidth: 220 }}>
+          <input
+            className="input"
+            placeholder="Search actor, target, detail…"
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            style={{ flex: 1, padding: '7px 12px', fontSize: '0.84rem' }}
+          />
+          <button type="submit" className="btn btn-ghost" style={{ fontSize: '0.83rem', padding: '7px 14px' }}>
+            Search
+          </button>
+        </form>
+        <select
+          className="select"
+          value={category}
+          onChange={e => { setCategory(e.target.value) }}
+          style={{ padding: '7px 12px', fontSize: '0.84rem', minWidth: 170 }}
+        >
+          {CATEGORY_OPTIONS.map(o => (
+            <option key={o.id} value={o.id}>{o.label}</option>
+          ))}
+        </select>
+      </div>
+
+      {/* Log entries */}
+      {loading && logs.length === 0 ? (
+        <div style={{ padding: '48px 0', textAlign: 'center', color: 'var(--text-muted)' }}>
+          <div className="spinner" style={{ margin: '0 auto 12px' }} />
+          Loading audit log…
+        </div>
+      ) : logs.length === 0 ? (
+        <div style={{ padding: '48px 0', textAlign: 'center', color: 'var(--text-muted)', fontSize: '0.88rem' }}>
+          No audit events found.
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+          {logs.map(log => {
+            const meta = ACTION_META[log.action] || { icon: '📋', color: 'var(--text-muted)' }
+            return (
+              <div key={log.id} style={{
+                display: 'grid', gridTemplateColumns: '32px 1fr auto',
+                gap: 12, alignItems: 'start',
+                padding: '12px 14px', borderRadius: 8,
+                background: 'var(--bg-surface)', border: '1px solid var(--border)',
+              }}>
+                {/* Icon */}
+                <div style={{
+                  width: 32, height: 32, borderRadius: '50%',
+                  background: meta.color + '18', border: `1px solid ${meta.color}33`,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  fontSize: 15, flexShrink: 0,
+                }}>
+                  {meta.icon}
+                </div>
+
+                {/* Body */}
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 2 }}>
+                    <span style={{
+                      fontSize: '0.72rem', fontWeight: 700, color: meta.color,
+                      background: meta.color + '14', padding: '1px 7px', borderRadius: 4,
+                      border: `1px solid ${meta.color}30`, textTransform: 'uppercase', letterSpacing: '0.04em',
+                    }}>
+                      {actionLabel(log.action)}
+                    </span>
+                    {log.target_label && (
+                      <span style={{ fontSize: '0.82rem', fontWeight: 600, color: 'var(--text-primary)' }}>
+                        {log.target_label}
+                      </span>
+                    )}
+                  </div>
+                  {log.detail && (
+                    <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+                      {log.detail}
+                    </div>
+                  )}
+                  <div style={{ display: 'flex', gap: 12, marginTop: 4, flexWrap: 'wrap' }}>
+                    {log.actor_email && (
+                      <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                        by {log.actor_name || log.actor_email}
+                      </span>
+                    )}
+                    <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', textTransform: 'capitalize' }}>
+                      {log.category?.replace('_', ' ')}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Timestamp */}
+                <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', whiteSpace: 'nowrap', textAlign: 'right', paddingTop: 2 }}>
+                  {fmtTs(log.timestamp)}
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
+
+      {/* Load more */}
+      {hasMore && !loading && (
+        <div style={{ textAlign: 'center', marginTop: 16 }}>
+          <button className="btn btn-ghost" onClick={() => load(offset)} style={{ fontSize: '0.83rem' }}>
+            Load more
+          </button>
+        </div>
+      )}
+      {loading && logs.length > 0 && (
+        <div style={{ textAlign: 'center', marginTop: 16, color: 'var(--text-muted)', fontSize: '0.82rem' }}>
+          Loading…
+        </div>
+      )}
+    </div>
+  )
+}
+
+/* ── Coming Soon placeholder ─────────────────────────────────────────────── */
+
+function ComingSoon({ label }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: 300, color: 'var(--text-muted)', gap: 12 }}>
+      <div style={{ fontSize: 36 }}>🚧</div>
+      <div style={{ fontSize: '1rem', fontWeight: 600, color: 'var(--text-primary)' }}>Coming Soon</div>
+      <div style={{ fontSize: '0.83rem', textAlign: 'center', maxWidth: 340, lineHeight: 1.6 }}>
+        {label ? <><strong>{label}</strong> is</> : 'This feature is'} on the roadmap and will be available in a future update.
+      </div>
+    </div>
+  )
+}
+
+/* ── Authentication panel ────────────────────────────────────────────────── */
+
+function AuthenticationPanel({ config }) {
+  return (
+    <div>
+      <div className="alert alert-info" style={{ marginBottom: 20, fontSize: '0.82rem' }}>
+        ℹ️ Access is managed entirely in <strong>Microsoft Entra ID</strong>. Assign users or groups in the Azure Portal to grant or revoke access.
+      </div>
+      {config ? (
+        <>
+          <InfoRow label="Tenant ID"    value={config.tenantId}        mono />
+          <InfoRow label="Client ID"    value={config.clientId}        mono />
+          <InfoRow label="Redirect URI" value={window.location.origin} mono />
+          <div style={{ marginTop: 24 }}>
+            <a href="https://portal.azure.com/#view/Microsoft_AAD_IAM/StartboardApplicationsMenuBlade/~/AppAppsPreview"
+              target="_blank" rel="noreferrer" className="btn btn-ghost"
+              style={{ display: 'inline-flex', fontSize: '0.82rem', gap: 6 }}>
+              🔗 Open Azure Enterprise Applications
+            </a>
+          </div>
+        </>
+      ) : (
+        <div className="flex items-center gap-3" style={{ color: 'var(--text-secondary)' }}>
+          <div className="spinner" /><span className="text-sm">Loading config…</span>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/* ── Integrations panel (system + client sub-tabs) ───────────────────────── */
+
+function IntegrationsPanel() {
+  const [sub, setSub] = useState('system')
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      <div style={{ display: 'flex', borderBottom: '1px solid var(--border)', marginBottom: 20, flexShrink: 0 }}>
+        {[{ id: 'system', label: 'System Integrations' }, { id: 'client', label: 'Client Integrations' }].map(s => (
+          <button key={s.id} onClick={() => setSub(s.id)} style={{
+            background: 'none', border: 'none', cursor: 'pointer',
+            padding: '10px 16px', fontSize: '0.85rem',
+            fontWeight: sub === s.id ? 600 : 400, fontFamily: 'var(--font-sans)',
+            color: sub === s.id ? 'var(--cyan)' : 'var(--text-secondary)',
+            borderBottom: `2px solid ${sub === s.id ? 'var(--cyan)' : 'transparent'}`,
+            marginBottom: -1, transition: 'all 0.15s',
+          }}>{s.label}</button>
+        ))}
+      </div>
+      {sub === 'system' ? <IntegrationsTab /> : <ClientIntegrationsTab />}
+    </div>
+  )
+}
+
+/* ── Nav structure definition ────────────────────────────────────────────── */
+
+const NAV_STRUCTURE = [
+  {
+    section: 'Account Settings',
+    items: [
+      { id: 'account',             label: 'Account' },
+      { id: 'authentication',      label: 'Authentication' },
+      { id: 'plans_billing',       label: 'Plans & Billing',      soon: true },
+      { id: 'service_desk',        label: 'Service Desk Settings' },
+      { id: 'audit_log',           label: 'Audit Log' },
+      { id: 'email_notifications', label: 'Email Notifications',  admin: true },
+      { id: 'data_archival',       label: 'Data Archival',        soon: true },
+      { id: 'clients',             label: 'Clients',              admin: true },
+      { id: 'integrations',        label: 'Integrations',         perm: 'settings.integrations' },
+    ],
+  },
+  {
+    section: 'User Management',
+    items: [
+      { id: 'agents',           label: 'Agents',            perm: 'settings.users' },
+      { id: 'roles',            label: 'Roles',             perm: 'settings.roles' },
+      { id: 'departments',      label: 'Departments',       soon: true },
+      { id: 'dept_fields',      label: 'Department Fields', soon: true },
+      { id: 'requestors',       label: 'Requestors',        soon: true },
+      { id: 'user_fields',      label: 'User Fields',       soon: true },
+      { id: 'cab',              label: 'CAB',               soon: true },
+      { id: 'requester_groups', label: 'Requester Groups',  soon: true },
+      { id: 'work_schedule',    label: 'Work Schedule',     soon: true },
+    ],
+  },
+  {
+    section: 'Channels',
+    items: [
+      { id: 'ch_teams',   label: 'Servicebot for Microsoft Teams', soon: true },
+      { id: 'ch_slack',   label: 'Servicebot for Slack',           soon: true },
+      { id: 'ch_discord', label: 'Servicebot for Discord',         soon: true },
+    ],
+  },
+  {
+    section: 'Service Management',
+    items: [
+      { id: 'sm_g1',           type: 'group', label: 'Service Desk' },
+      { id: 'business_hours',  label: 'Business Hours',            soon: true },
+      { id: 'sla_ola',         label: 'SLA and OLA Policies',      soon: true },
+      { id: 'field_manager',   label: 'Field Manager',             soon: true },
+      { id: 'business_rules',  label: 'Business Rules for Forms',  soon: true },
+      { id: 'surveys',         label: 'Surveys',                   soon: true },
+      { id: 'sm_g2',           type: 'group', label: 'Service Request Management' },
+      { id: 'service_catalog', label: 'Service Catalog',           soon: true },
+      { id: 'emp_onboarding',  label: 'Employee Onboarding',       soon: true },
+      { id: 'emp_offboarding', label: 'Employee Offboarding',      soon: true },
+      { id: 'journeys',        label: 'Journeys',                  soon: true },
+    ],
+  },
+  {
+    section: 'Automation & Productivity',
+    items: [
+      { id: 'supervisor_rules', label: 'Supervisor Rules', soon: true },
+      { id: 'leaderboard',      label: 'Leaderboard',      soon: true },
+      { id: 'email_commands',   label: 'Email Commands',   soon: true },
+      { id: 'collaborate',      label: 'Collaborate',      soon: true },
+      { id: 'quick_links',      label: 'Quick Links',      perm: 'settings.quick_links' },
+    ],
+  },
+  {
+    section: 'Asset Management',
+    items: [
+      { id: 'asset_types',        label: 'Asset Types & Fields',   soon: true },
+      { id: 'discovery_hub',      label: 'Discovery Hub',          soon: true },
+      { id: 'product_catalog',    label: 'Product Catalog',        soon: true },
+      { id: 'vendors',            label: 'Vendors',                soon: true },
+      { id: 'vendor_fields',      label: 'Vendor Fields',          soon: true },
+      { id: 'software_fields',    label: 'Software Fields',        soon: true },
+      { id: 'contract_types',     label: 'Contract Types',         soon: true },
+      { id: 'po_fields',          label: 'Purchase Order Fields',  soon: true },
+      { id: 'asset_locations',    label: 'Locations',              soon: true },
+      { id: 'asset_depreciation', label: 'Asset Depreciation',     soon: true },
+    ],
+  },
+  {
+    section: 'Project & Workload Management',
+    items: [
+      { id: 'project_fields',   label: 'Project Fields',        soon: true },
+      { id: 'project_collab',   label: 'Project Collaboration', soon: true },
+      { id: 'workload_manager', label: 'Workload Manager',      soon: true },
+    ],
+  },
+  {
+    section: 'Facility Management',
+    items: [
+      { id: 'sites',            label: 'Sites',            perm: 'settings.sites' },
+      { id: 'conference_rooms', label: 'Conference Rooms', perm: 'settings.conference_rooms' },
+    ],
+  },
+]
+
 /* ── Main Settings page ──────────────────────────────────────────────────── */
 
 export default function Settings({ theme, setTheme }) {
   const { isAdmin, hasPermission } = useContext(UserContext)
-
-  const TABS = [
-    'General',
-    'Authentication',
-    hasPermission('settings.quick_links')      ? 'Quick Links'       : null,
-    hasPermission('settings.users')            ? 'Users'             : null,
-    hasPermission('settings.sites')            ? 'Sites'             : null,
-    hasPermission('settings.conference_rooms') ? 'Conference Rooms'  : null,
-    hasPermission('settings.integrations')     ? 'Integrations'      : null,
-    hasPermission('settings.roles')            ? 'Roles'             : null,
-  ].filter(Boolean)
-
-  const [tab, setTab]       = useState('General')
-  const [config, setConfig] = useState(null)
+  const [activeId, setActiveId] = useState('account')
+  const [config,   setConfig]   = useState(null)
 
   useEffect(() => {
     api.get('/api/settings/config').then(r => setConfig(r.data)).catch(() => {})
   }, [])
 
-  // Reset to General if current tab is no longer in scope
-  useEffect(() => {
-    if (!TABS.includes(tab)) setTab('General')
-  }, [isAdmin])
+  const isVisible = (item) => {
+    if (item.type === 'group') return true
+    if (item.admin && !isAdmin) return false
+    if (item.perm && !hasPermission(item.perm)) return false
+    return true
+  }
+
+  const allItems = NAV_STRUCTURE.flatMap(s => s.items)
+  const activeItem    = allItems.find(i => i.id === activeId)
+  const activeSection = NAV_STRUCTURE.find(s => s.items.some(i => i.id === activeId))
+
+  const renderContent = () => {
+    switch (activeId) {
+      case 'audit_log':           return <AuditLogPage />
+      case 'account':             return <GeneralTab config={config} isAdmin={isAdmin} />
+      case 'authentication':      return <AuthenticationPanel config={config} />
+      case 'service_desk':        return <TicketSettings />
+      case 'email_notifications': return isAdmin ? <NotificationSettings /> : <ComingSoon label="Email Notifications" />
+      case 'clients':             return isAdmin ? <ClientsWorkspace /> : null
+      case 'integrations':        return hasPermission('settings.integrations') ? <IntegrationsPanel /> : null
+      case 'agents':              return hasPermission('settings.users')        ? <UsersTab />         : null
+      case 'roles':               return hasPermission('settings.roles')        ? <RolesTab />         : null
+      case 'quick_links':         return hasPermission('settings.quick_links')  ? <QuickLinksTab />    : null
+      case 'sites':               return hasPermission('settings.sites')        ? <SitesTab />         : null
+      case 'conference_rooms':    return hasPermission('settings.conference_rooms') ? <ConferenceRoomsTab /> : null
+      default:                    return <ComingSoon label={activeItem?.label} />
+    }
+  }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-      {/* Tabs */}
-      <div style={{ display: 'flex', borderBottom: '1px solid var(--border)', flexShrink: 0, flexWrap: 'wrap' }}>
-        {TABS.map(t => (
-          <button key={t} onClick={() => setTab(t)} style={{
-            background: 'none', border: 'none', cursor: 'pointer',
-            padding: '12px 16px', fontSize: '0.85rem', fontWeight: 500,
-            fontFamily: 'var(--font-sans)',
-            color: tab === t ? 'var(--cyan)' : 'var(--text-secondary)',
-            borderBottom: `2px solid ${tab === t ? 'var(--cyan)' : 'transparent'}`,
-            marginBottom: -1, transition: 'all 0.15s',
-          }}>{t}</button>
-        ))}
+    <div style={{ display: 'flex', height: '100%', overflow: 'hidden' }}>
+
+      {/* Left sidebar nav */}
+      <div style={{
+        width: 240, flexShrink: 0, borderRight: '1px solid var(--border)',
+        overflowY: 'auto', padding: '12px 0 24px', background: 'var(--bg-base)',
+      }}>
+        {NAV_STRUCTURE.map(({ section, items }) => {
+          const visible = items.filter(isVisible)
+          if (!visible.some(i => i.type !== 'group')) return null
+          return (
+            <div key={section} style={{ marginBottom: 6 }}>
+              <div style={{
+                padding: '10px 16px 4px',
+                fontSize: '0.63rem', fontWeight: 700, color: 'var(--text-muted)',
+                textTransform: 'uppercase', letterSpacing: '0.1em',
+              }}>
+                {section}
+              </div>
+              {visible.map(item => {
+                if (item.type === 'group') {
+                  return (
+                    <div key={item.id} style={{
+                      padding: '8px 16px 3px 22px',
+                      fontSize: '0.61rem', fontWeight: 700, color: 'var(--text-muted)',
+                      textTransform: 'uppercase', letterSpacing: '0.07em', opacity: 0.6,
+                    }}>
+                      {item.label}
+                    </div>
+                  )
+                }
+                const isActive = activeId === item.id
+                return (
+                  <button key={item.id} onClick={() => setActiveId(item.id)} style={{
+                    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                    width: '100%', padding: '6px 12px 6px 22px',
+                    background: isActive ? 'rgba(6,182,212,0.08)' : 'transparent',
+                    border: 'none', borderLeft: `2px solid ${isActive ? 'var(--cyan)' : 'transparent'}`,
+                    cursor: 'pointer', textAlign: 'left',
+                    color: isActive ? 'var(--cyan)' : 'var(--text-secondary)',
+                    fontSize: '0.84rem', fontWeight: isActive ? 600 : 400,
+                    fontFamily: 'var(--font-sans)', transition: 'all 0.12s',
+                  }}>
+                    <span>{item.label}</span>
+                    {item.soon && (
+                      <span style={{
+                        fontSize: '0.6rem', fontWeight: 600, color: 'var(--text-muted)',
+                        background: 'var(--bg-elevated)', padding: '1px 5px', borderRadius: 3,
+                        border: '1px solid var(--border)', flexShrink: 0, marginLeft: 4,
+                      }}>
+                        Soon
+                      </span>
+                    )}
+                  </button>
+                )
+              })}
+            </div>
+          )
+        })}
       </div>
 
-      {/* Body */}
-      <div style={{ flex: 1, overflowY: 'auto', padding: 24 }}>
-        {tab === 'General' && (
-          <GeneralTab config={config} isAdmin={isAdmin} theme={theme} setTheme={setTheme} />
-        )}
-        {tab === 'Authentication' && (
-          <div>
-            <div className="alert alert-info" style={{ marginBottom: 20, fontSize: '0.82rem' }}>
-              ℹ️ Access is managed entirely in <strong>Microsoft Entra ID</strong>. Assign users or groups in the Azure Portal to grant or revoke access.
+      {/* Content area */}
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        {/* Page header breadcrumb */}
+        <div style={{
+          padding: '14px 28px 13px', borderBottom: '1px solid var(--border)',
+          flexShrink: 0, background: 'var(--bg-base)',
+        }}>
+          {activeSection && (
+            <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginBottom: 2, textTransform: 'uppercase', letterSpacing: '0.07em', fontWeight: 600 }}>
+              {activeSection.section}
             </div>
-            {config ? (
-              <>
-                <InfoRow label="Tenant ID"    value={config.tenantId}        mono />
-                <InfoRow label="Client ID"    value={config.clientId}        mono />
-                <InfoRow label="Redirect URI" value={window.location.origin} mono />
-                <div style={{ marginTop: 24 }}>
-                  <a href="https://portal.azure.com/#view/Microsoft_AAD_IAM/StartboardApplicationsMenuBlade/~/AppAppsPreview"
-                    target="_blank" rel="noreferrer" className="btn btn-ghost"
-                    style={{ display: 'inline-flex', fontSize: '0.82rem', gap: 6 }}>
-                    🔗 Open Azure Enterprise Applications
-                  </a>
-                </div>
-              </>
-            ) : (
-              <div className="flex items-center gap-3" style={{ color: 'var(--text-secondary)' }}>
-                <div className="spinner" /><span className="text-sm">Loading config…</span>
-              </div>
-            )}
+          )}
+          <div style={{ fontSize: '1.05rem', fontWeight: 700, color: 'var(--text-primary)' }}>
+            {activeItem?.label ?? 'Settings'}
           </div>
-        )}
-        {tab === 'Quick Links'      && hasPermission('settings.quick_links')      && <QuickLinksTab />}
-        {tab === 'Users'            && hasPermission('settings.users')            && <UsersTab />}
-        {tab === 'Sites'            && hasPermission('settings.sites')            && <SitesTab />}
-        {tab === 'Conference Rooms' && hasPermission('settings.conference_rooms') && <ConferenceRoomsTab />}
-        {tab === 'Integrations'     && hasPermission('settings.integrations')     && <IntegrationsTab />}
-        {tab === 'Roles'            && hasPermission('settings.roles')            && <RolesTab />}
+        </div>
+
+        {/* Panel content */}
+        <div style={{ flex: 1, overflowY: 'auto', padding: activeId === 'clients' ? 0 : 28 }}>
+          {renderContent()}
+        </div>
       </div>
     </div>
   )

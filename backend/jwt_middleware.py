@@ -20,7 +20,7 @@ from jose import jwt as jose_jwt, JWTError
 load_dotenv(dotenv_path=Path(__file__).parent / ".env", override=True)
 
 # Routes that do NOT require auth
-PUBLIC_PATHS = {"/api/health", "/api/settings/branding", "/api/settings/config", "/api/auth/sso-providers", "/api/auth/okta/callback", "/api/auth/saml/acs", "/api/auth/saml/metadata", "/docs", "/openapi.json", "/redoc"}
+PUBLIC_PATHS = {"/api/health", "/api/settings/branding", "/api/settings/config", "/api/auth/sso-providers", "/api/auth/google/login", "/api/auth/google/callback", "/api/auth/okta/callback", "/api/auth/saml/acs", "/api/auth/saml/metadata", "/api/portal/auth/login", "/api/auth/login", "/docs", "/openapi.json", "/redoc", "/api/events/stream"}
 
 # In-memory caches
 # token_hash → (expires_at, user_dict)
@@ -60,10 +60,12 @@ def _try_portal_jwt(token: str) -> dict | None:
         if payload.get("iss") != "controlpoint":
             return None
         return {
-            "id":         payload.get("sub"),
-            "email":      payload.get("email", ""),
-            "first_name": payload.get("first_name", ""),
-            "last_name":  payload.get("last_name", ""),
+            "id":          payload.get("sub"),
+            "email":       payload.get("email", ""),
+            "first_name":  payload.get("first_name", ""),
+            "last_name":   payload.get("last_name", ""),
+            "customer_id": payload.get("customer_id"),
+            "is_admin":    payload.get("is_admin", False),
         }
     except JWTError:
         return None

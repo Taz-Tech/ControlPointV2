@@ -1,8 +1,12 @@
 import { useState, useEffect, useCallback } from 'react'
 import axios from 'axios'
 
-export default function LoginPage({ onLogin }) {
+export default function LoginPage({ onLogin, onLocalLogin }) {
   const [email, setEmail]           = useState('')
+  const [password, setPassword]     = useState('')
+  const [step, setStep]             = useState('email')   // 'email' | 'password'
+  const [localError, setLocalError] = useState('')
+  const [submitting, setSubmitting] = useState(false)
   const [theme, setTheme]           = useState(() => localStorage.getItem('theme') || 'dark')
   const [ssoProviders, setSsoProviders] = useState([])
 
@@ -19,6 +23,25 @@ export default function LoginPage({ onLogin }) {
 
   const toggleTheme = useCallback(() => setTheme(t => t === 'dark' ? 'light' : 'dark'), [])
   const isDark = theme === 'dark'
+
+  const handleEmailContinue = () => {
+    if (!email.trim()) return
+    setStep('password')
+    setLocalError('')
+  }
+
+  const handlePasswordSubmit = async () => {
+    if (!password.trim() || submitting) return
+    setSubmitting(true)
+    setLocalError('')
+    try {
+      await onLocalLogin(email.trim(), password)
+    } catch (e) {
+      setLocalError(e.message || 'Invalid email or password')
+    } finally {
+      setSubmitting(false)
+    }
+  }
 
   const btnBg      = isDark ? '#2f2f2f' : '#f6f8fa'
   const btnBgHover = isDark ? '#3a3a3a' : '#eaeef2'
@@ -110,8 +133,8 @@ export default function LoginPage({ onLogin }) {
               </div>
             </div>
 
-            {/* Microsoft 365 button */}
-            <button
+            {/* Microsoft 365 button — only shown when Azure AD is enabled */}
+            {onLogin && <button
               onClick={onLogin}
               style={{
                 width: '100%',
@@ -135,7 +158,7 @@ export default function LoginPage({ onLogin }) {
                 <rect x="11" y="11" width="9" height="9" fill="#ffb900"/>
               </svg>
               Sign in with Microsoft 365
-            </button>
+            </button>}
 
             {/* SSO provider buttons */}
             {ssoProviders.map(p => (
@@ -159,11 +182,20 @@ export default function LoginPage({ onLogin }) {
                 onMouseEnter={e => e.currentTarget.style.background = btnBgHover}
                 onMouseLeave={e => e.currentTarget.style.background = btnBg}
               >
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                  <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="1.5"/>
-                  <path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z" fill="currentColor"/>
-                  <path d="M2 12h3M19 12h3M12 2v3M12 19v3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
-                </svg>
+                {p.id === 'google' ? (
+                  <svg width="18" height="18" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
+                    <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
+                    <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/>
+                    <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
+                  </svg>
+                ) : (
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="1.5"/>
+                    <path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z" fill="currentColor"/>
+                    <path d="M2 12h3M19 12h3M12 2v3M12 19v3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+                  </svg>
+                )}
                 Sign in with {p.name}
               </a>
             ))}
@@ -175,36 +207,75 @@ export default function LoginPage({ onLogin }) {
               <div style={{ flex: 1, height: 1, background: 'var(--border)' }} />
             </div>
 
-            {/* Email input */}
-            <input
-              className="input"
-              type="email"
-              placeholder="Enter your email"
-              value={email}
-              onChange={e => setEmail(e.target.value)}
-              onKeyDown={e => e.key === 'Enter' && email.trim() && onLogin()}
-              style={{ width: '100%', fontSize: '0.9rem', marginBottom: 10, boxSizing: 'border-box' }}
-            />
-
-            {/* Continue with email — always black */}
-            <button
-              onClick={() => email.trim() && onLogin()}
-              style={{
-                width: '100%',
-                padding: '12px 20px',
-                background: '#000',
-                border: '1px solid #000',
-                borderRadius: 8,
-                color: '#fff',
-                fontSize: '0.9rem', fontWeight: 600,
-                cursor: email.trim() ? 'pointer' : 'default',
-                opacity: email.trim() ? 1 : 0.35,
-                fontFamily: 'var(--font-sans)',
-                transition: 'opacity 0.15s',
-              }}
-            >
-              Continue with email
-            </button>
+            {/* Email / password step */}
+            {step === 'email' ? (
+              <>
+                <input
+                  className="input"
+                  type="email"
+                  placeholder="Enter your email"
+                  value={email}
+                  onChange={e => setEmail(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && email.trim() && handleEmailContinue()}
+                  style={{ width: '100%', fontSize: '0.9rem', marginBottom: 10, boxSizing: 'border-box' }}
+                />
+                <button
+                  onClick={handleEmailContinue}
+                  style={{
+                    width: '100%', padding: '12px 20px',
+                    background: '#000', border: '1px solid #000',
+                    borderRadius: 8, color: '#fff',
+                    fontSize: '0.9rem', fontWeight: 600,
+                    cursor: email.trim() ? 'pointer' : 'default',
+                    opacity: email.trim() ? 1 : 0.35,
+                    fontFamily: 'var(--font-sans)', transition: 'opacity 0.15s',
+                  }}
+                >
+                  Continue with email
+                </button>
+              </>
+            ) : (
+              <>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                  <button
+                    onClick={() => { setStep('email'); setLocalError('') }}
+                    style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', fontSize: '1rem', padding: '2px 4px', lineHeight: 1 }}
+                    title="Back"
+                  >←</button>
+                  <span style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', flex: 1 }}>{email}</span>
+                </div>
+                <input
+                  className="input"
+                  type="password"
+                  placeholder="Password"
+                  value={password}
+                  autoFocus
+                  onChange={e => setPassword(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && handlePasswordSubmit()}
+                  style={{ width: '100%', fontSize: '0.9rem', marginBottom: localError ? 8 : 10, boxSizing: 'border-box' }}
+                />
+                {localError && (
+                  <div style={{ fontSize: '0.78rem', color: '#ef4444', marginBottom: 10, padding: '6px 10px', background: 'rgba(239,68,68,0.08)', borderRadius: 6 }}>
+                    {localError}
+                  </div>
+                )}
+                <button
+                  onClick={handlePasswordSubmit}
+                  disabled={submitting || !password.trim()}
+                  style={{
+                    width: '100%', padding: '12px 20px',
+                    background: '#000', border: '1px solid #000',
+                    borderRadius: 8, color: '#fff',
+                    fontSize: '0.9rem', fontWeight: 600,
+                    cursor: password.trim() && !submitting ? 'pointer' : 'default',
+                    opacity: password.trim() && !submitting ? 1 : 0.35,
+                    fontFamily: 'var(--font-sans)', transition: 'opacity 0.15s',
+                  }}
+                >
+                  {submitting ? 'Signing in…' : 'Sign in'}
+                </button>
+              </>
+            )}
 
             {/* Footer links */}
             <div style={{
@@ -229,7 +300,7 @@ export default function LoginPage({ onLogin }) {
 
         {/* Copyright footer */}
         <div style={{ position: 'absolute', bottom: 20, left: 0, right: 0, textAlign: 'center', fontSize: '0.72rem', color: 'var(--text-muted)' }}>
-          © 2026 ControlPoint · Access governed by Microsoft Entra ID
+          © 2026 ControlPoint · controlpoint.tk-flow.com
         </div>
       </div>
     </div>

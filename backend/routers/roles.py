@@ -7,6 +7,7 @@ from sqlalchemy import select
 from ..database import get_db
 from ..models import Role, UserRecord, ALL_PERMISSIONS
 from .settings import require_admin
+from ..audit_log import log_audit
 
 router = APIRouter(prefix="/api/roles", tags=["roles"])
 
@@ -55,7 +56,7 @@ async def list_permissions():
 
 
 @router.post("/")
-async def create_role(body: RoleCreate, _: UserRecord = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+async def create_role(body: RoleCreate, admin: UserRecord = Depends(require_admin), db: AsyncSession = Depends(get_db)):
     name = body.name.strip().lower().replace(" ", "_")
     if not name:
         raise HTTPException(status_code=400, detail="Role name is required")
@@ -76,6 +77,11 @@ async def create_role(body: RoleCreate, _: UserRecord = Depends(require_admin), 
         permissions=json.dumps(body.permissions),
     )
     db.add(role)
+    await db.flush()
+    await log_audit(db, actor=admin, action="role.created",
+                    category="roles", target_type="role", target_id=name,
+                    target_label=body.label or name,
+                    detail=f"{admin.email} created role '{body.label or name}' with {len(body.permissions)} permission(s)")
     await db.commit()
     await db.refresh(role)
     return _role_out(role)
@@ -85,7 +91,7 @@ async def create_role(body: RoleCreate, _: UserRecord = Depends(require_admin), 
 async def update_role(
     role_name: str,
     body: RoleUpdate,
-    _: UserRecord = Depends(require_admin),
+    admin: UserRecord = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(select(Role).where(Role.name == role_name))
@@ -97,6 +103,7 @@ async def update_role(
         role.label = body.label.strip() or role.label
     if body.description is not None:
         role.description = body.description.strip()
+    old_perms = json.loads(role.permissions or "[]")
     if body.permissions is not None:
         invalid = [p for p in body.permissions if p not in ALL_PERMISSIONS]
         if invalid:
@@ -107,6 +114,20 @@ async def update_role(
         else:
             role.permissions = json.dumps(body.permissions)
 
+    new_perms = json.loads(role.permissions or "[]")
+    added   = [p for p in new_perms if p not in old_perms]
+    removed = [p for p in old_perms if p not in new_perms]
+    changes = []
+    if added:   changes.append(f"+{len(added)} permission(s)")
+    if removed: changes.append(f"-{len(removed)} permission(s)")
+    if body.label and not role.is_system: changes.append(f"label → {body.label}")
+    if body.description is not None:      changes.append("description updated")
+
+    await log_audit(db, actor=admin, action="role.updated",
+                    category="roles", target_type="role", target_id=role_name,
+                    target_label=role.label,
+                    detail=f"{admin.email} updated role '{role.label}': {', '.join(changes) if changes else 'no changes'}",
+                    extra={"added_permissions": added, "removed_permissions": removed})
     await db.commit()
     await db.refresh(role)
     return _role_out(role)
@@ -115,7 +136,7 @@ async def update_role(
 @router.delete("/{role_name}")
 async def delete_role(
     role_name: str,
-    _: UserRecord = Depends(require_admin),
+    admin: UserRecord = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(select(Role).where(Role.name == role_name))
@@ -127,9 +148,18 @@ async def delete_role(
 
     # Demote any users currently assigned to this role
     users_result = await db.execute(select(UserRecord).where(UserRecord.role == role_name))
-    for user in users_result.scalars().all():
+    affected_users = users_result.scalars().all()
+    for user in affected_users:
         user.role = "user"
 
+    label = role.label
     await db.delete(role)
+    await db.flush()
+    await log_audit(db, actor=admin, action="role.deleted",
+                    category="roles", target_type="role", target_id=role_name,
+                    target_label=label,
+                    detail=f"{admin.email} deleted role '{label}'" +
+                           (f"; {len(affected_users)} user(s) demoted to 'user'" if affected_users else ""),
+                    extra={"affected_user_count": len(affected_users)})
     await db.commit()
     return {"deleted": True}

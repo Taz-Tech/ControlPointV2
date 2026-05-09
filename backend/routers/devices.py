@@ -18,7 +18,7 @@ router = APIRouter(prefix="/api/devices", tags=["devices"])
 
 # In-memory cache for devices found via ImmyBot server-side filter fallback.
 # Populated by /lookup and proactively by /search when pagination misses a device.
-# Pre-loaded from SQLite on startup so it survives server restarts.
+# Pre-loaded from Supabase on startup so it survives server restarts.
 _immybot_filter_cache: dict[str, dict] = {}  # normalized_name -> shaped device
 
 # Tracks normalized names confirmed absent from ImmyBot via filter so we don't
@@ -29,7 +29,7 @@ _MISS_CACHE_TTL = 300  # seconds (5 minutes)
 
 async def load_filter_cache_from_db() -> None:
     """
-    Called once at startup.  Reads persisted ImmyBot filter-cache rows from SQLite
+    Called once at startup.  Reads persisted ImmyBot filter-cache rows from Supabase
     and populates _immybot_filter_cache so invisible devices are available immediately
     without waiting for background probes to re-discover them.
     """
@@ -45,7 +45,7 @@ async def load_filter_cache_from_db() -> None:
 async def _db_save_filter_device(normalized_name: str, immybot_id: int | None,
                                   shaped: dict, last_event_at: str | None) -> None:
     """
-    Upsert a single filter-found device into SQLite.  Skips the write if
+    Upsert a single filter-found device into Supabase.  Skips the write if
     last_event_at hasn't changed (avoids thrashing on repeated lookups).
     """
     if not immybot_id:

@@ -1,8 +1,10 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useContext } from 'react'
 import FloorMapManager from './PortSecurity/FloorMapManager.jsx'
 import { getSites, getMap, getZones, getUnifiHosts, getPortStatuses, getPortClients } from '../api/client.js'
+import { ClientContext } from '../ClientContext.js'
 
 export default function Locations() {
+  const { selectedClient } = useContext(ClientContext)
   const [sites,          setSites]          = useState([])
   const [selectedSiteId, setSelectedSiteId] = useState('')
   const [currentMap,     setCurrentMap]     = useState(null)
@@ -16,9 +18,12 @@ export default function Locations() {
   const [portClients,    setPortClients]    = useState({})
 
   useEffect(() => {
-    getSites().then(r => setSites(r.data)).catch(() => {})
+    getSites(selectedClient?.id ?? null).then(r => setSites(r.data)).catch(() => {})
     getUnifiHosts().then(r => setUnifiHosts(r.data)).catch(() => {})
-  }, [])
+    setSelectedSiteId('')
+    setCurrentMap(null)
+    setSelectedMapId('')
+  }, [selectedClient])
 
   const selectedSite = sites.find(s => s.id === parseInt(selectedSiteId)) || null
 

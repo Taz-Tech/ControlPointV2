@@ -1,6 +1,6 @@
 import os
 import httpx
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request, Form
 from fastapi.responses import RedirectResponse, Response
@@ -34,17 +34,22 @@ def _okta_base(domain: str) -> str:
     return f"https://{domain}"
 
 
-def issue_portal_token(user_id: str, email: str, first_name: str, last_name: str) -> str:
+def issue_portal_token(
+    user_id: str, email: str, first_name: str, last_name: str,
+    customer_id: int | None = None, is_admin: bool = False,
+) -> str:
     now = datetime.utcnow()
     return jose_jwt.encode(
         {
-            "iss":        PORTAL_JWT_ISSUER,
-            "sub":        user_id,
-            "email":      email,
-            "first_name": first_name,
-            "last_name":  last_name,
-            "iat":        int(now.timestamp()),
-            "exp":        int((now + timedelta(hours=8)).timestamp()),
+            "iss":         PORTAL_JWT_ISSUER,
+            "sub":         user_id,
+            "email":       email,
+            "first_name":  first_name,
+            "last_name":   last_name,
+            "customer_id": customer_id,
+            "is_admin":    is_admin,
+            "iat":         int(now.timestamp()),
+            "exp":         int((now + timedelta(hours=8)).timestamp()),
         },
         _portal_jwt_secret(),
         algorithm=PORTAL_JWT_ALGO,
@@ -101,6 +106,15 @@ async def sso_providers():
     """Return configured SSO providers for the login page. Public — no auth required."""
     providers = []
 
+    # Google OAuth
+    google_client_id = os.getenv("GOOGLE_CLIENT_ID", "").strip()
+    if google_client_id:
+        providers.append({
+            "id":       "google",
+            "name":     "Google",
+            "auth_url": "/api/auth/google/login",
+        })
+
     # SAML takes priority when the IdP SSO URL is set
     idp_sso_url = os.getenv("OKTA_SAML_IDP_SSO_URL", "").strip()
     if idp_sso_url:
@@ -124,6 +138,104 @@ async def sso_providers():
             providers.append({"id": "okta", "name": "SSO", "auth_url": auth_url})
 
     return {"providers": providers}
+
+
+# ── Google OAuth2 endpoints ───────────────────────────────────────────────────
+
+@router.get("/google/login")
+async def google_login(request: Request):
+    """Redirect the browser to Google's OAuth consent screen."""
+    client_id = os.getenv("GOOGLE_CLIENT_ID", "").strip()
+    if not client_id:
+        raise HTTPException(status_code=503, detail="Google OAuth not configured — set GOOGLE_CLIENT_ID.")
+
+    # Use the public-facing HTTPS origin for the redirect URI.
+    # request.base_url reflects the internal HTTP connection (nginx → uvicorn),
+    # so we prefer the X-Forwarded-Host/Proto headers set by the reverse proxy,
+    # falling back to the first HTTPS origin in ALLOWED_ORIGINS.
+    forwarded_proto = request.headers.get("x-forwarded-proto", "")
+    forwarded_host  = request.headers.get("x-forwarded-host", "") or request.headers.get("host", "")
+    if forwarded_proto and forwarded_host:
+        backend_origin = f"{forwarded_proto}://{forwarded_host}"
+    else:
+        backend_origin = _portal_url()
+    redirect_uri = f"{backend_origin}/api/auth/google/callback"
+
+    # Pass the SPA origin (from Referer) through state so the callback knows
+    # where to send the browser after auth (e.g. http://localhost:5173 vs production).
+    referer    = request.headers.get("referer", "")
+    parsed     = urlparse(referer)
+    spa_origin = f"{parsed.scheme}://{parsed.netloc}" if parsed.netloc else _portal_url()
+
+    auth_url = "https://accounts.google.com/o/oauth2/v2/auth?" + urlencode({
+        "client_id":     client_id,
+        "response_type": "code",
+        "scope":         "openid email profile",
+        "redirect_uri":  redirect_uri,
+        "access_type":   "online",
+        "state":         spa_origin,
+    })
+    return RedirectResponse(url=auth_url)
+
+
+@router.get("/google/callback")
+async def google_callback(request: Request, code: str, state: str = "", db: AsyncSession = Depends(get_db)):
+    """Exchange Google auth code for tokens, fetch user info, issue portal JWT."""
+    client_id     = os.getenv("GOOGLE_CLIENT_ID",     "").strip()
+    client_secret = os.getenv("GOOGLE_CLIENT_SECRET", "").strip()
+    if not all([client_id, client_secret]):
+        raise HTTPException(status_code=503, detail="Google OAuth not configured — set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET.")
+
+    # redirect_uri must exactly match what was sent in /google/login
+    forwarded_proto = request.headers.get("x-forwarded-proto", "")
+    forwarded_host  = request.headers.get("x-forwarded-host", "") or request.headers.get("host", "")
+    if forwarded_proto and forwarded_host:
+        backend_origin = f"{forwarded_proto}://{forwarded_host}"
+    else:
+        backend_origin = _portal_url()
+    redirect_uri = f"{backend_origin}/api/auth/google/callback"
+
+    async with httpx.AsyncClient(timeout=15) as c:
+        r = await c.post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "grant_type":    "authorization_code",
+                "code":          code,
+                "redirect_uri":  redirect_uri,
+                "client_id":     client_id,
+                "client_secret": client_secret,
+            },
+        )
+
+    if r.status_code != 200:
+        raise HTTPException(status_code=401, detail=f"Google token exchange failed: {r.text[:200]}")
+
+    access_token = r.json().get("access_token", "")
+    if not access_token:
+        raise HTTPException(status_code=401, detail="No access_token in Google response")
+
+    async with httpx.AsyncClient(timeout=10) as c:
+        r2 = await c.get(
+            "https://www.googleapis.com/oauth2/v3/userinfo",
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+
+    if r2.status_code != 200:
+        raise HTTPException(status_code=401, detail="Could not fetch Google user info")
+
+    info       = r2.json()
+    google_sub = info.get("sub", "")
+    email      = (info.get("email") or "").lower().strip()
+    first_name = info.get("given_name") or (info.get("name") or "").split(" ")[0]
+    last_name  = info.get("family_name") or ""
+    user_id    = f"google-{google_sub}" if google_sub else f"google-{email}"
+
+    from .settings import _upsert_user
+    await _upsert_user(db, user_id, first_name, last_name, email)
+
+    token      = issue_portal_token(user_id, email, first_name, last_name)
+    spa_origin = state if state else _portal_url()
+    return RedirectResponse(url=f"{spa_origin}/admin#token={token}", status_code=302)
 
 
 async def _enrich_directory_user(db: AsyncSession, email: str, okta_sub: str) -> None:
@@ -226,7 +338,7 @@ async def okta_callback(code: str, state: str = "", db: AsyncSession = Depends(g
 
     # Issue a portal session JWT and redirect the browser back to the SPA
     token = issue_portal_token(user_id, email, first_name, last_name)
-    return RedirectResponse(url=f"{_portal_url()}/#token={token}", status_code=302)
+    return RedirectResponse(url=f"{_portal_url()}/admin#token={token}", status_code=302)
 
 
 # ── SAML 2.0 endpoints ────────────────────────────────────────────────────────
@@ -287,7 +399,7 @@ async def saml_acs(
     await _upsert_user(db, user_id, first_name, last_name, email)
 
     token = issue_portal_token(user_id, email, first_name, last_name)
-    return RedirectResponse(url=f"{portal_url}/#token={token}", status_code=302)
+    return RedirectResponse(url=f"{portal_url}/admin#token={token}", status_code=302)
 
 
 @router.get("/saml/metadata")

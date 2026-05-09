@@ -1,8 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 from pydantic import BaseModel
+from typing import Optional
 
 from ..database import get_db
 from ..models import Site, Switch, FloorMap, UserRecord, UnifiDevice
@@ -15,6 +16,7 @@ router = APIRouter(prefix="/api/sites", tags=["sites"])
 
 class SiteCreate(BaseModel):
     name: str
+    customer_id: Optional[int] = None
 
 class SiteUnifiHost(BaseModel):
     unifi_host_id: str | None = None
@@ -30,6 +32,7 @@ def _site_out(site: Site) -> dict:
     return {
         "id":            site.id,
         "name":          site.name,
+        "customer_id":   site.customer_id,
         "unifi_host_id": site.unifi_host_id,
         "switches": [
             {
@@ -72,10 +75,11 @@ async def _load_site(site_id: int, db: AsyncSession) -> Site:
 
 
 @router.get("/")
-async def list_sites(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(
-        select(Site).options(selectinload(Site.switches), selectinload(Site.floor_maps), selectinload(Site.unifi_devices))
-    )
+async def list_sites(customer_id: Optional[int] = Query(None), db: AsyncSession = Depends(get_db)):
+    q = select(Site).options(selectinload(Site.switches), selectinload(Site.floor_maps), selectinload(Site.unifi_devices))
+    if customer_id is not None:
+        q = q.where(Site.customer_id == customer_id)
+    result = await db.execute(q)
     return [_site_out(s) for s in result.scalars().all()]
 
 
@@ -84,7 +88,7 @@ async def create_site(body: SiteCreate, _: UserRecord = Depends(_require_sites_e
     name = body.name.strip()
     if not name:
         raise HTTPException(status_code=400, detail="Site name is required")
-    site = Site(name=name)
+    site = Site(name=name, customer_id=body.customer_id)
     db.add(site)
     await db.commit()
     await db.refresh(site)
@@ -112,6 +116,20 @@ async def set_unifi_host(site_id: int, body: SiteUnifiHost, _: UserRecord = Depe
     if not site:
         raise HTTPException(status_code=404, detail="Site not found")
     site.unifi_host_id = body.unifi_host_id or None
+    await db.commit()
+    return _site_out(await _load_site(site_id, db))
+
+
+class SiteCustomer(BaseModel):
+    customer_id: Optional[int] = None
+
+@router.patch("/{site_id}/customer")
+async def set_site_customer(site_id: int, body: SiteCustomer, _: UserRecord = Depends(_require_sites_edit), db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Site).where(Site.id == site_id))
+    site = result.scalar_one_or_none()
+    if not site:
+        raise HTTPException(status_code=404, detail="Site not found")
+    site.customer_id = body.customer_id
     await db.commit()
     return _site_out(await _load_site(site_id, db))
 

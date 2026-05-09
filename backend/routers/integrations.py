@@ -1,18 +1,20 @@
 import os
 import re
+import json
 import uuid
 import base64
 import httpx
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from fastapi import APIRouter, HTTPException, UploadFile, File, Depends, Request
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from jose import jwt as jose_jwt
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import get_db
-from ..models import UserRecord
+from ..models import UserRecord, ClientIntegration, TicketCustomer
 from .settings import require_admin
 
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
@@ -585,6 +587,169 @@ def _inject_portal_url(guide: list[dict]) -> list[dict]:
         for step in guide
     ]
 
+
+# ── Client Integration CRUD ───────────────────────────────────────────────────
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _ci_out(ci: ClientIntegration, customer_name: str | None = None) -> dict:
+    intg_def = INTEGRATIONS.get(ci.integration_type, {})
+    fields   = intg_def.get("fields", [])
+    raw_vals: dict = json.loads(ci.values_json or "{}")
+    fields_out = []
+    for f in fields:
+        v = raw_vals.get(f["key"], "")
+        fields_out.append({**f, "value": MASK if (f.get("secret") and v) else v})
+    return {
+        "id":               ci.id,
+        "customer_id":      ci.customer_id,
+        "customer_name":    customer_name,
+        "integration_type": ci.integration_type,
+        "name":             intg_def.get("name", ci.integration_type),
+        "icon":             intg_def.get("icon", "🔌"),
+        "label":            ci.label,
+        "enabled":          ci.enabled,
+        "configured":       all(raw_vals.get(f["key"], "").strip() for f in fields if not f.get("optional")),
+        "fields":           fields_out,
+        "created_at":       ci.created_at,
+    }
+
+
+class ClientIntegrationIn(BaseModel):
+    customer_id:      int
+    integration_type: str
+    label:            str | None = None
+    values:           dict[str, str] = {}
+
+
+class ClientIntegrationUpdate(BaseModel):
+    label:   str | None = None
+    values:  dict[str, str] = {}
+    enabled: bool | None = None
+
+
+@router.get("/clients/")
+async def list_client_integrations(customer_id: int | None = None, db: AsyncSession = Depends(get_db)):
+    stmt = select(ClientIntegration)
+    if customer_id:
+        stmt = stmt.where(ClientIntegration.customer_id == customer_id)
+    rows = (await db.execute(stmt)).scalars().all()
+    cust_ids = list({r.customer_id for r in rows})
+    cust_map: dict[int, str] = {}
+    if cust_ids:
+        custs = (await db.execute(select(TicketCustomer).where(TicketCustomer.id.in_(cust_ids)))).scalars().all()
+        cust_map = {c.id: c.name for c in custs}
+    return [_ci_out(r, cust_map.get(r.customer_id)) for r in rows]
+
+
+@router.post("/clients/", status_code=201)
+async def create_client_integration(body: ClientIntegrationIn, _: UserRecord = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+    if body.integration_type not in INTEGRATIONS:
+        raise HTTPException(400, "Unknown integration type")
+    existing = (await db.execute(
+        select(ClientIntegration).where(
+            ClientIntegration.customer_id == body.customer_id,
+            ClientIntegration.integration_type == body.integration_type,
+        )
+    )).scalar_one_or_none()
+    if existing:
+        raise HTTPException(409, "This client already has that integration configured")
+    intg_def = INTEGRATIONS[body.integration_type]
+    vals: dict[str, str] = {}
+    for f in intg_def["fields"]:
+        v = body.values.get(f["key"], "").strip()
+        if v:
+            vals[f["key"]] = v
+    now = _now_iso()
+    ci = ClientIntegration(
+        customer_id=body.customer_id,
+        integration_type=body.integration_type,
+        label=body.label,
+        values_json=json.dumps(vals),
+        enabled=True,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(ci)
+    await db.commit()
+    await db.refresh(ci)
+    cust = (await db.execute(select(TicketCustomer).where(TicketCustomer.id == ci.customer_id))).scalar_one_or_none()
+    return _ci_out(ci, cust.name if cust else None)
+
+
+@router.put("/clients/{ci_id}")
+async def update_client_integration(ci_id: int, body: ClientIntegrationUpdate, _: UserRecord = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+    ci = (await db.execute(select(ClientIntegration).where(ClientIntegration.id == ci_id))).scalar_one_or_none()
+    if not ci:
+        raise HTTPException(404, "Not found")
+    intg_def = INTEGRATIONS.get(ci.integration_type, {})
+    if body.label is not None:
+        ci.label = body.label
+    if body.enabled is not None:
+        ci.enabled = body.enabled
+    if body.values:
+        old_vals: dict = json.loads(ci.values_json or "{}")
+        for f in intg_def.get("fields", []):
+            k = f["key"]
+            v = body.values.get(k, "").strip()
+            if f.get("secret") and (not v or v == MASK):
+                continue
+            if v:
+                old_vals[k] = v
+        ci.values_json = json.dumps(old_vals)
+    ci.updated_at = _now_iso()
+    await db.commit()
+    cust = (await db.execute(select(TicketCustomer).where(TicketCustomer.id == ci.customer_id))).scalar_one_or_none()
+    return _ci_out(ci, cust.name if cust else None)
+
+
+@router.delete("/clients/{ci_id}", status_code=204)
+async def delete_client_integration(ci_id: int, _: UserRecord = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+    ci = (await db.execute(select(ClientIntegration).where(ClientIntegration.id == ci_id))).scalar_one_or_none()
+    if not ci:
+        raise HTTPException(404, "Not found")
+    await db.delete(ci)
+    await db.commit()
+
+
+@router.post("/clients/{ci_id}/toggle")
+async def toggle_client_integration(ci_id: int, body: IntegrationEnabled, _: UserRecord = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+    ci = (await db.execute(select(ClientIntegration).where(ClientIntegration.id == ci_id))).scalar_one_or_none()
+    if not ci:
+        raise HTTPException(404, "Not found")
+    ci.enabled = body.enabled
+    ci.updated_at = _now_iso()
+    await db.commit()
+    return {"id": ci_id, "enabled": ci.enabled}
+
+
+@router.post("/clients/{ci_id}/test")
+async def test_client_integration(ci_id: int, _: UserRecord = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+    ci = (await db.execute(select(ClientIntegration).where(ClientIntegration.id == ci_id))).scalar_one_or_none()
+    if not ci:
+        raise HTTPException(404, "Not found")
+    raw: dict = json.loads(ci.values_json or "{}")
+    try:
+        if ci.integration_type == "freshservice":   return await _test_freshservice(raw)
+        if ci.integration_type == "microsoft365":   return await _test_microsoft365(raw)
+        if ci.integration_type == "immybot":        return await _test_immybot(raw)
+        if ci.integration_type == "intune":         return await _test_intune(raw)
+        if ci.integration_type == "arcticwolf":     return await _test_arcticwolf(raw)
+        if ci.integration_type == "ringcentral":    return await _test_ringcentral(raw)
+        if ci.integration_type == "unifi":          return await _test_unifi(raw)
+        if ci.integration_type == "okta":           return await _test_okta(raw)
+        if ci.integration_type == "meraki":         return await _test_meraki(raw)
+        if ci.integration_type == "fortinet":       return await _test_fortinet(raw)
+        if ci.integration_type == "ccure":          return await _test_ccure(raw)
+        if ci.integration_type == "papercut":       return await _test_papercut(raw)
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+    return {"success": False, "message": "Test not available for this integration type"}
+
+
+# ── Global integration list / update ─────────────────────────────────────────
 
 @router.get("/")
 async def list_integrations():
