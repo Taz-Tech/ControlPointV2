@@ -897,6 +897,21 @@ class ProcurementAttachment(Base):
     uploaded_by   = Column(String,  ForeignKey("user_records.id", ondelete="SET NULL"), nullable=True)
 
 
+class Feature(Base):
+    """One row per product feature. Enables/disables capabilities and stores per-feature config."""
+    __tablename__ = "features"
+
+    id          = Column(Integer, primary_key=True, autoincrement=True)
+    key         = Column(Text, nullable=False, unique=True)
+    name        = Column(Text, nullable=False)
+    description = Column(Text, nullable=False, default="")
+    category    = Column(Text, nullable=False, default="general")
+    enabled     = Column(Boolean, nullable=False, default=False)
+    config      = Column(Text, nullable=False, default="{}")   # JSON
+    updated_at  = Column(Text, nullable=False, default="")
+    updated_by  = Column(Text, nullable=False, default="")
+
+
 class AuditLog(Base):
     """Immutable record of every administrative action taken in ControlPoint."""
     __tablename__ = "audit_logs"

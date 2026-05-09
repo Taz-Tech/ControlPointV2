@@ -118,6 +118,106 @@ async def seed_notification_rules():
         await session.commit()
 
 
+_DEFAULT_FEATURES = [
+    {
+        "key":         "native_ticketing",
+        "name":        "Native Ticketing System",
+        "description": "Built-in ticketing with SLA tracking, knowledge base, change management, problem management, and project boards.",
+        "category":    "ticketing",
+        "enabled":     False,
+    },
+    {
+        "key":         "external_ticketing",
+        "name":        "External Ticket Integration",
+        "description": "Connect an existing ticketing system (Freshservice, Jira, ServiceNow, or Zendesk) and manage tickets from within ControlPoint.",
+        "category":    "ticketing",
+        "enabled":     False,
+    },
+    {
+        "key":         "knowledge_base",
+        "name":        "Knowledge Base",
+        "description": "Internal KB articles for agents and self-service articles for portal users.",
+        "category":    "ticketing",
+        "enabled":     True,
+    },
+    {
+        "key":         "change_management",
+        "name":        "Change Management",
+        "description": "Track and approve planned changes with CAB workflow.",
+        "category":    "ticketing",
+        "enabled":     True,
+    },
+    {
+        "key":         "problem_management",
+        "name":        "Problem Management",
+        "description": "Link recurring incidents to root-cause problem records.",
+        "category":    "ticketing",
+        "enabled":     True,
+    },
+    {
+        "key":         "project_management",
+        "name":        "Project Management",
+        "description": "Project boards with task tracking and milestone management.",
+        "category":    "ticketing",
+        "enabled":     True,
+    },
+    {
+        "key":         "customer_portal",
+        "name":        "Customer Portal",
+        "description": "Self-service portal where end users can submit tickets, check status, and browse the knowledge base.",
+        "category":    "ticketing",
+        "enabled":     False,
+    },
+    {
+        "key":         "asset_management",
+        "name":        "Asset Management",
+        "description": "Track hardware, software, and contracts with lifecycle management.",
+        "category":    "it_management",
+        "enabled":     True,
+    },
+    {
+        "key":         "network_management",
+        "name":        "Network Management",
+        "description": "UniFi, switch management, and network topology views.",
+        "category":    "it_management",
+        "enabled":     True,
+    },
+    {
+        "key":         "device_management",
+        "name":        "Device Management",
+        "description": "ImmyBot and Intune device search, status, and deployment management.",
+        "category":    "it_management",
+        "enabled":     True,
+    },
+]
+
+
+async def seed_features():
+    """Insert default feature flags that don't yet exist. Never overwrites existing rows."""
+    from datetime import datetime, timezone
+    from .models import Feature
+    from sqlalchemy import select
+
+    now = datetime.now(timezone.utc).isoformat()
+    async with AsyncSessionLocal() as session:
+        for feat in _DEFAULT_FEATURES:
+            exists = (await session.execute(
+                select(Feature).where(Feature.key == feat["key"])
+            )).scalar_one_or_none()
+            if not exists:
+                session.add(Feature(
+                    key=feat["key"],
+                    name=feat["name"],
+                    description=feat["description"],
+                    category=feat["category"],
+                    enabled=feat["enabled"],
+                    config="{}",
+                    updated_at=now,
+                    updated_by="system",
+                ))
+        await session.commit()
+
+
 async def get_db():
     async with AsyncSessionLocal() as session:
         yield session

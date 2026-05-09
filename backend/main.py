@@ -9,8 +9,8 @@ from contextlib import asynccontextmanager
 
 load_dotenv(dotenv_path=Path(__file__).parent / ".env", override=True)
 
-from .database import create_all, seed_roles, seed_notification_rules
-from .routers import users, switches, maps, freshservice, mailboxes, settings, immybot, shortcuts, bookmarks, sites, integrations, devices, logitech_sync, intune, conference_rooms, room_configs, ringcentral, zones, roles as roles_router, unifi, directory, sso, ticketing, kb, portal, auth_local, procurement, assets as assets_router, notifications as notifications_router, events as events_router, audit as audit_router, ticket_integration as ticket_integration_router
+from .database import create_all, seed_roles, seed_notification_rules, seed_features
+from .routers import users, switches, maps, freshservice, mailboxes, settings, immybot, shortcuts, bookmarks, sites, integrations, devices, logitech_sync, intune, conference_rooms, room_configs, ringcentral, zones, roles as roles_router, unifi, directory, sso, ticketing, kb, portal, auth_local, procurement, assets as assets_router, notifications as notifications_router, events as events_router, audit as audit_router, ticket_integration as ticket_integration_router, features as features_router
 from .jwt_middleware import AzureJWTMiddleware
 
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
@@ -27,6 +27,7 @@ async def lifespan(app: FastAPI):
     await create_all()
     await seed_roles()
     await seed_notification_rules()
+    await seed_features()
     # Pre-warm the ImmyBot filter cache from Supabase so devices that are invisible
     # to unfiltered pagination (e.g. onboardingStatus=2) are available immediately
     # on the first request rather than waiting for background probes to find them.
@@ -88,6 +89,7 @@ app.include_router(notifications_router.router)
 app.include_router(events_router.router)
 app.include_router(audit_router.router)
 app.include_router(ticket_integration_router.router)
+app.include_router(features_router.router)
 
 
 @app.get("/api/health")

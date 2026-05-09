@@ -14,7 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import get_db
-from ..models import TicketSystemConfig
+from ..models import Feature
 
 load_dotenv(dotenv_path=Path(__file__).parent.parent / ".env", override=True)
 
@@ -22,26 +22,33 @@ router = APIRouter(prefix="/api/ticket-integration", tags=["ticket-integration"]
 
 # ── Config helpers ────────────────────────────────────────────────────────────
 
-_DEFAULT_CFG: dict = {
-    "native_ticketing_enabled": False,
-    "external_provider": None,      # "freshservice" | "jira" | "servicenow" | "zendesk"
-    "external_config": {},          # provider-specific credentials
-}
+async def _get_ticketing_mode(db: AsyncSession) -> dict:
+    """Read native_ticketing and external_ticketing feature rows."""
+    rows = (await db.execute(
+        select(Feature).where(Feature.key.in_(["native_ticketing", "external_ticketing"]))
+    )).scalars().all()
+    feat_map = {r.key: r for r in rows}
 
-async def _get_cfg(db: AsyncSession) -> dict:
-    row = (await db.execute(
-        select(TicketSystemConfig).where(TicketSystemConfig.id == 1)
-    )).scalar_one_or_none()
-    if not row:
-        return dict(_DEFAULT_CFG)
-    try:
-        stored = json.loads(row.settings)
-        return {**_DEFAULT_CFG, **stored}
-    except Exception:
-        return dict(_DEFAULT_CFG)
+    native_row   = feat_map.get("native_ticketing")
+    external_row = feat_map.get("external_ticketing")
 
-def _provider_cfg(cfg: dict) -> dict:
-    return cfg.get("external_config", {}).get(cfg.get("external_provider", ""), {})
+    native_enabled = native_row.enabled if native_row else False
+
+    provider, pcfg = None, {}
+    if external_row and external_row.enabled:
+        try:
+            cfg = json.loads(external_row.config) if external_row.config else {}
+        except Exception:
+            cfg = {}
+        provider = cfg.get("provider")
+        pcfg     = cfg.get(provider, {}) if provider else {}
+
+    return {
+        "native":     native_enabled,
+        "provider":   provider,
+        "pcfg":       pcfg,
+        "configured": bool(provider and pcfg),
+    }
 
 def _require_auth(request: Request):
     if not getattr(request.state, "user", None):
@@ -632,16 +639,12 @@ async def _dispatch_comment(provider: str, pcfg: dict, ticket_id: str, body: str
 @router.get("/mode")
 async def get_mode(db: AsyncSession = Depends(get_db)):
     """Return which ticketing mode is active for this tenant."""
-    cfg = await _get_cfg(db)
-    native   = bool(cfg.get("native_ticketing_enabled", False))
-    provider = cfg.get("external_provider") or None
-    ext_cfg  = cfg.get("external_config", {})
-    configured = bool(provider and ext_cfg.get(provider))
+    m = await _get_ticketing_mode(db)
     return {
-        "mode":       "native" if native else ("integration" if configured else "none"),
-        "native":     native,
-        "provider":   provider,
-        "configured": configured,
+        "mode":       "native" if m["native"] else ("integration" if m["configured"] else "none"),
+        "native":     m["native"],
+        "provider":   m["provider"],
+        "configured": m["configured"],
     }
 
 @router.get("/tickets")
@@ -651,13 +654,11 @@ async def list_tickets(
     db: AsyncSession = Depends(get_db),
 ):
     _require_auth(request)
-    cfg      = await _get_cfg(db)
-    provider = cfg.get("external_provider")
-    pcfg     = _provider_cfg(cfg)
-    if not provider or not pcfg:
+    m = await _get_ticketing_mode(db)
+    if not m["configured"]:
         raise HTTPException(503, "No external ticket provider configured")
-    tickets = await _dispatch_list(provider, pcfg, {"status": status})
-    return {"tickets": tickets, "provider": provider, "total": len(tickets)}
+    tickets = await _dispatch_list(m["provider"], m["pcfg"], {"status": status})
+    return {"tickets": tickets, "provider": m["provider"], "total": len(tickets)}
 
 @router.get("/tickets/{ticket_id}")
 async def get_ticket(
@@ -666,12 +667,10 @@ async def get_ticket(
     db: AsyncSession = Depends(get_db),
 ):
     _require_auth(request)
-    cfg      = await _get_cfg(db)
-    provider = cfg.get("external_provider")
-    pcfg     = _provider_cfg(cfg)
-    if not provider or not pcfg:
+    m = await _get_ticketing_mode(db)
+    if not m["configured"]:
         raise HTTPException(503, "No external ticket provider configured")
-    return await _dispatch_get(provider, pcfg, ticket_id)
+    return await _dispatch_get(m["provider"], m["pcfg"], ticket_id)
 
 @router.post("/tickets")
 async def create_ticket(
@@ -680,14 +679,12 @@ async def create_ticket(
     db: AsyncSession = Depends(get_db),
 ):
     _require_auth(request)
-    cfg      = await _get_cfg(db)
-    provider = cfg.get("external_provider")
-    pcfg     = _provider_cfg(cfg)
-    if not provider or not pcfg:
+    m = await _get_ticketing_mode(db)
+    if not m["configured"]:
         raise HTTPException(503, "No external ticket provider configured")
     if not body.get("subject"):
         raise HTTPException(422, "subject is required")
-    return await _dispatch_create(provider, pcfg, body)
+    return await _dispatch_create(m["provider"], m["pcfg"], body)
 
 @router.patch("/tickets/{ticket_id}")
 async def update_ticket(
@@ -697,12 +694,10 @@ async def update_ticket(
     db: AsyncSession = Depends(get_db),
 ):
     _require_auth(request)
-    cfg      = await _get_cfg(db)
-    provider = cfg.get("external_provider")
-    pcfg     = _provider_cfg(cfg)
-    if not provider or not pcfg:
+    m = await _get_ticketing_mode(db)
+    if not m["configured"]:
         raise HTTPException(503, "No external ticket provider configured")
-    return await _dispatch_update(provider, pcfg, ticket_id, body)
+    return await _dispatch_update(m["provider"], m["pcfg"], ticket_id, body)
 
 @router.post("/tickets/{ticket_id}/comments")
 async def add_comment(
@@ -712,42 +707,12 @@ async def add_comment(
     db: AsyncSession = Depends(get_db),
 ):
     _require_auth(request)
-    cfg      = await _get_cfg(db)
-    provider = cfg.get("external_provider")
-    pcfg     = _provider_cfg(cfg)
-    if not provider or not pcfg:
+    m = await _get_ticketing_mode(db)
+    if not m["configured"]:
         raise HTTPException(503, "No external ticket provider configured")
     text    = body.get("body", "").strip()
     private = bool(body.get("private", False))
     if not text:
         raise HTTPException(422, "body is required")
-    return await _dispatch_comment(provider, pcfg, ticket_id, text, private)
+    return await _dispatch_comment(m["provider"], m["pcfg"], ticket_id, text, private)
 
-@router.put("/config")
-async def save_integration_config(
-    body: dict,
-    request: Request,
-    db: AsyncSession = Depends(get_db),
-):
-    """Save external provider credentials. Admin only."""
-    user = getattr(request.state, "user", None)
-    if not user:
-        raise HTTPException(401, "Authentication required")
-    allowed = {"freshservice", "jira", "servicenow", "zendesk"}
-    provider = body.get("provider")
-    if provider and provider not in allowed:
-        raise HTTPException(422, f"provider must be one of {allowed}")
-    row = (await db.execute(select(TicketSystemConfig).where(TicketSystemConfig.id == 1))).scalar_one_or_none()
-    if not row:
-        row = TicketSystemConfig(id=1, settings="{}")
-        db.add(row)
-    existing = json.loads(row.settings) if row.settings else {}
-    if provider:
-        existing["external_provider"] = provider
-    if "config" in body:
-        ext_cfg = existing.get("external_config", {})
-        ext_cfg[provider or existing.get("external_provider", "")] = body["config"]
-        existing["external_config"] = ext_cfg
-    row.settings = json.dumps(existing)
-    await db.commit()
-    return {"ok": True}

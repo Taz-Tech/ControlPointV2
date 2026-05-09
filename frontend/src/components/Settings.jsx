@@ -1,5 +1,6 @@
 import { useState, useEffect, useContext, useRef, useCallback } from 'react'
 import NotificationSettings from './NotificationSettings.jsx'
+import FeaturesTab from './FeaturesTab.jsx'
 import FloorMapManager from './PortSecurity/FloorMapManager.jsx'
 import TicketSettings from './Ticketing/TicketSettings.jsx'
 import ReactCrop, { centerCrop, makeAspectCrop } from 'react-image-crop'
@@ -3720,6 +3721,7 @@ const NAV_STRUCTURE = [
     section: 'Account Settings',
     items: [
       { id: 'account',             label: 'Account' },
+      { id: 'features',            label: 'Features',             admin: true },
       { id: 'authentication',      label: 'Authentication' },
       { id: 'plans_billing',       label: 'Plans & Billing',      soon: true },
       { id: 'service_desk',        label: 'Service Desk Settings' },
@@ -3836,6 +3838,7 @@ export default function Settings({ theme, setTheme }) {
     switch (activeId) {
       case 'audit_log':           return <AuditLogPage />
       case 'account':             return <GeneralTab config={config} isAdmin={isAdmin} />
+      case 'features':            return isAdmin ? <FeaturesTab /> : null
       case 'authentication':      return <AuthenticationPanel config={config} />
       case 'service_desk':        return <TicketSettings />
       case 'email_notifications': return isAdmin ? <NotificationSettings /> : <ComingSoon label="Email Notifications" />
