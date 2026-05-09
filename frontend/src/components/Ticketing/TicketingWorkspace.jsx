@@ -45,7 +45,7 @@ export default function TicketingWorkspace({ section = 'dashboard', onNavigate, 
   useEffect(() => {
     api.get('/api/ticket-integration/mode')
       .then(r => setTicketMode(r.data))
-      .catch(() => setTicketMode({ mode: 'native', native: true, provider: null, configured: false }))
+      .catch(() => setTicketMode({ mode: 'none', native: false, provider: null, configured: false }))
   }, [])
 
   // Reset when switching sections; navigate() already cleared the hash ID
@@ -83,8 +83,10 @@ export default function TicketingWorkspace({ section = 'dashboard', onNavigate, 
 
   // Integration mode — delegate entirely to the integration view
   if (!ticketMode.native) {
-    if (!ticketMode.configured) return <SetupPrompt />
-    return <IntegrationTicketView provider={ticketMode.provider} />
+    if (ticketMode.provider && ticketMode.configured) {
+      return <IntegrationTicketView provider={ticketMode.provider} />
+    }
+    return <SetupPrompt />
   }
 
   if (selectedTicket) {
