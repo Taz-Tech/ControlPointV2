@@ -77,8 +77,13 @@ const WORKSPACES = [
     ],
   },
   {
-    id: 'ticketing', label: 'Ticketing', icon: '🎫', defaultPage: 'tkt_dashboard',
+    id: 'ticketing', label: 'Ticketing', icon: '🎫', defaultPage: 'tkt_tickets',
     groups: [
+      { label: 'Tickets', items: [
+        { id: 'tkt_tickets', icon: '🎫', label: 'Tickets' },
+      ]},
+    ],
+    _nativeGroups: [
       { label: 'Overview', items: [
         { id: 'tkt_dashboard', icon: '📊', label: 'Dashboard'         },
       ]},
@@ -426,6 +431,7 @@ export default function App() {
   const [notifCount,         setNotifCount]         = useState(0)
   const [showNotifPanel,     setShowNotifPanel]     = useState(false)
   const [notifOpenTicketId,  setNotifOpenTicketId]  = useState(null)
+  const [ticketMode,         setTicketMode]         = useState(null)  // null=loading
   const userMenuRef         = useRef(null)
   const appearanceRef       = useRef(null)
   const appearanceCloseTimer = useRef(null)
@@ -462,6 +468,12 @@ export default function App() {
         email: r.data.email || '',
       })
     }).catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    api.get('/api/ticket-integration/mode')
+      .then(r => setTicketMode(r.data))
+      .catch(() => setTicketMode({ mode: 'none', native: false, provider: null, configured: false }))
   }, [])
 
   // Close user menu on outside click
@@ -543,9 +555,15 @@ export default function App() {
 
   const currentWs = WORKSPACES.find(w => w.id === activeWorkspace)
 
+  // For the ticketing workspace, use the full native nav when native mode is active,
+  // otherwise collapse to just Tickets (integration / setup view).
+  const resolvedWs = currentWs && currentWs.id === 'ticketing' && ticketMode?.native
+    ? { ...currentWs, groups: currentWs._nativeGroups }
+    : currentWs
+
   // Sidebar nav for the active workspace
-  const sidebarGroups = currentWs
-    ? currentWs.groups.map(g => ({ ...g, items: g.items.filter(canSeeItem) })).filter(g => g.items.length > 0)
+  const sidebarGroups = resolvedWs
+    ? resolvedWs.groups.map(g => ({ ...g, items: g.items.filter(canSeeItem) })).filter(g => g.items.length > 0)
     : []
 
   // Route real non-staff users to portal (never triggers when assuming)
@@ -679,12 +697,12 @@ export default function App() {
         <div className="app-body">
 
           {/* Sidebar */}
-          {currentWs && (
+          {resolvedWs && (
             <aside className={`sidebar${sidebarCollapsed ? ' collapsed' : ''}`}>
               {/* Workspace label */}
               <div className="sidebar-ws-label">
-                <span className="sidebar-ws-icon">{currentWs.icon}</span>
-                <span className="sidebar-ws-name">{currentWs.label}</span>
+                <span className="sidebar-ws-icon">{resolvedWs.icon}</span>
+                <span className="sidebar-ws-name">{resolvedWs.label}</span>
               </div>
 
               <nav className="sidebar-nav">
